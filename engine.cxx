@@ -2,22 +2,30 @@
 #include <cmath>
 bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 {
+	
 	//this->world = dWorldCreate();
 	this->bpp = bpp;
 	this->height = height;
 	this->width = width;
 	this->fullscreen = fullscreen;
 	SDL_Init(SDL_INIT_VIDEO);
-	this->screen = SDL_SetVideoMode(this->width,this->height,this->bpp,SDL_OPENGL);//Avvia SDL
-	glewInit();//Avvia GLEW per poter utilizzare GLSL
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); 
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0); 
+	this->screen = SDL_CreateWindow("Spring Map Editor", SDL_WINDOWPOS_UNDEFINED,
+                          SDL_WINDOWPOS_UNDEFINED,this->width,this->height,SDL_WINDOW_OPENGL);//Avvia SDL
+	SDL_GLContext context = SDL_GL_CreateContext(this->screen);
+	
 	if (this->fullscreen)
-		SDL_WM_ToggleFullScreen(this->screen);
+		SDL_SetWindowFullscreen(this->screen, this->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 
 	SDL_GL_SetAttribute(SDL_GL_RED_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,16);
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
+	
+	glewInit();//Avvia GLEW per poter utilizzare GLSL
 	this->textengine.initfont();
 	this->textengine.disph = height;
 	this->textengine.dispw = width;
@@ -193,13 +201,14 @@ void engine::clearscreen(float r,float g,float b,float a)
                 break;
 	    
             case SDL_MOUSEBUTTONDOWN:
-		this->wup = ev.button.button == SDL_BUTTON_WHEELUP;
-		this->wdown = ev.button.button == SDL_BUTTON_WHEELDOWN; 
-	
-	     
                 this->mouseleft = ev.button.button == SDL_BUTTON_LEFT && ev.button.state == SDL_PRESSED;
                 this->mouseright = ev.button.button == SDL_BUTTON_RIGHT && ev.button.state == SDL_PRESSED;
                 break;
+			case SDL_MOUSEWHEEL:
+				this->wup = ev.wheel.y > 0;
+				this->wdown = ev.wheel.y < 0;
+					
+				
             case SDL_MOUSEBUTTONUP:
                 this->mouseleft = ev.button.button == SDL_BUTTON_LEFT && ev.button.state == SDL_PRESSED;
                 this->mouseright = ev.button.button == SDL_BUTTON_RIGHT && ev.button.state == SDL_PRESSED;
@@ -248,7 +257,7 @@ void engine::clearscreen(float r,float g,float b,float a)
 bool engine::getkey(char key)
 {
 
-	this->keys = SDL_GetKeyState(NULL);
+	this->keys = SDL_GetKeyboardState(NULL);
 	if (this->keys[key])
 	{
 		return true;
@@ -258,7 +267,7 @@ bool engine::getkey(char key)
 }
 void engine::display(void)
 {
-	SDL_GL_SwapBuffers();
+	SDL_GL_SwapWindow(screen);
 	this->rendertime = SDL_GetTicks()-this->cleartime;
 }
 bool engine::Terminate(void)
@@ -272,7 +281,8 @@ bool engine::ToggleFullScreen(void)
 	if (this->screen == NULL)
 		return false;
 
-	SDL_WM_ToggleFullScreen(this->screen);
+	if (this->fullscreen)
+		SDL_SetWindowFullscreen(this->screen, this->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
 	return true;
 }
 float engine::getfps(void)

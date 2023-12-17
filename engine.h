@@ -1,6 +1,6 @@
-#include <SDL/SDL.h>
+#include <SDL.h>
 #include <GL/glew.h>
-
+//#include <SDL_opengl_glext.h>
 #include "font.h"
 class engine{
     public:
@@ -34,10 +34,10 @@ class engine{
 	Uint32 cleartime;
 	Uint32 rendertime;
 	bool fullscreen;
-	Uint8 *keys;
+	const Uint8 *keys;
 	public:
 	oglstr textengine;
-	SDL_Surface* screen;
+	SDL_Window* screen;
 	bool getkey(char key);
 	float getfps(void);
 	void ExtractFrustum();

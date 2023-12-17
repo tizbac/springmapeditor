@@ -489,7 +489,7 @@ int main(int argc, char ** argv)
 	float tilesize2 = 16.0;
 	CSmfReadMap* map;
 	
-	map = (CSmfReadMap*)(mapl->LoadMap(smffile,smfpath,progresscallback));
+	map = (CSmfReadMap*)(mapl->LoadMap(smffile,smfpath));
     int mw = map->width;
     int mh = map->height;
 	groundshader.createfromfiles("./groundshader.frag","./groundshader.vert");
@@ -550,7 +550,7 @@ int main(int argc, char ** argv)
 	glEnable(GL_NORMALIZE);
 	glEnable(GL_TEXTURE_2D);
 	CBFGroundTextures * tex;
-	tex = new CBFGroundTextures((CSmfReadMap*)map,progresscallback);
+	tex = new CBFGroundTextures((CSmfReadMap*)map);
 	printf("Entering main loop\n");
 	int x,y,z,X,Y,Z;
 	int MAP_SIZEX = map->width+1;
@@ -559,7 +559,7 @@ int main(int argc, char ** argv)
 	
 	float cval = 0.0;
 
-	SDL_WM_GrabInput(SDL_GRAB_ON);
+	SDL_SetRelativeMouseMode(SDL_TRUE);
 
 	Main->SetCameraPos(0,0,-10);
 	pxx = -map->width*8/1024;
@@ -588,7 +588,7 @@ int main(int argc, char ** argv)
 		Main->clearscreen(0.5,0.5,0.5,1.0);
 		
 		//font->RenderString(rxx,ryy,6.0,txt);
-		if ( Main->getkey(SDLK_ESCAPE))
+		if ( Main->getkey(SDL_SCANCODE_ESCAPE))
 			quite = true;
 
 		if ( Main->up)
@@ -596,7 +596,7 @@ int main(int argc, char ** argv)
 			pxx += 20 / max(1.0,(double)Main->getfps());
 		}
 		//printf("pxx=%f\n",pxx);
-		if ( Main->getkey('q'))
+		if ( Main->getkey(SDL_SCANCODE_Q))
 		{
 			pyy += 20 / max(1.0,(double)Main->getfps());
 		}
@@ -665,23 +665,23 @@ int main(int argc, char ** argv)
 			rzz -= 20 / Main->getfps();
 		}*/
 		
-        if ( Main->getkey('a' ) and brushsize < 100)
+        if ( Main->getkey(SDL_SCANCODE_A ) and brushsize < 100)
 		{
 			brushsize += 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey('z' ) and brushsize > 0)
+		if ( Main->getkey(SDL_SCANCODE_Z) and brushsize > 0)
 		{
 			brushsize -= 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey('c' ) and hval < FLT_MAX)
+		if ( Main->getkey(SDL_SCANCODE_C ) and hval < FLT_MAX)
 		{
 			hval += 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey('x' ) and brushsize > 0)
+		if ( Main->getkey(SDL_SCANCODE_X ) and brushsize > 0)
 		{
 			hval -= 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey('b' ) and brushsize > 0)
+		if ( Main->getkey(SDL_SCANCODE_B ) and brushsize > 0)
 		{
 			hval = cval;
 		}
@@ -724,7 +724,7 @@ int main(int argc, char ** argv)
 		//glColorMaterial(GL_FRONT_AND_BACK,GL_DIFFUSE);
 		if ( Main->getkey('f'))
 		{
-			SDL_WM_ToggleFullScreen(Main->screen);
+			Main->ToggleFullScreen();
 
 		}
         Main->SetCameraRotation(rxx,ryy,rzz);
@@ -1067,7 +1067,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
 		Main->display();
 	}
 	
-	SDL_WM_GrabInput(SDL_GRAB_OFF);
+	SDL_SetRelativeMouseMode(SDL_FALSE);
 	Main->Terminate();
 	bool save = false;
 	

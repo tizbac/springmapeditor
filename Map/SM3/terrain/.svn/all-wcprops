@@ -1,0 +1,113 @@
+K 25
+svn:wc:ra_dav:version-url
+V 66
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain
+END
+Lightcalc.h
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Lightcalc.h
+END
+TerrainTexEnvCombine.h
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTexEnvCombine.h
+END
+TerrainVertexBuffer.h
+K 25
+svn:wc:ra_dav:version-url
+V 88
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainVertexBuffer.h
+END
+TerrainUtil.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 82
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainUtil.cpp
+END
+Terrain.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 78
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Terrain.cpp
+END
+TerrainBase.h
+K 25
+svn:wc:ra_dav:version-url
+V 80
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainBase.h
+END
+TerrainTextureGLSL.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 89
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTextureGLSL.cpp
+END
+Terrain.h
+K 25
+svn:wc:ra_dav:version-url
+V 76
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Terrain.h
+END
+TerrainTextureGLSL.h
+K 25
+svn:wc:ra_dav:version-url
+V 87
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTextureGLSL.h
+END
+TerrainNode.h
+K 25
+svn:wc:ra_dav:version-url
+V 80
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainNode.h
+END
+Textures.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 79
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Textures.cpp
+END
+QuadRenderData.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 85
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/QuadRenderData.cpp
+END
+TerrainTexture.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 85
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTexture.cpp
+END
+Textures.h
+K 25
+svn:wc:ra_dav:version-url
+V 77
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Textures.h
+END
+Lightcalc.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 80
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/Lightcalc.cpp
+END
+TerrainTexture.h
+K 25
+svn:wc:ra_dav:version-url
+V 83
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTexture.h
+END
+TerrainTexEnvCombine.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 91
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainTexEnvCombine.cpp
+END
+TerrainVertexBuffer.cpp
+K 25
+svn:wc:ra_dav:version-url
+V 90
+/svn/spring/!svn/ver/6205/branches/0.77-branch/rts/Map/SM3/terrain/TerrainVertexBuffer.cpp
+END

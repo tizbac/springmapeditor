@@ -113,7 +113,7 @@ void CFontTextureRenderer::AddGlyph(FT_GlyphSlot slot, int &outX, int &outY)
 
 	curX += bmp.width + GLYPH_MARGIN;	// leave one pixel space between each glyph
 	cur  += 2*(bmp.width + GLYPH_MARGIN); 	// 2channels (luminance and alpha))
-	curHeight = std::max(curHeight, bmp.rows);
+	curHeight = std::max((unsigned int)curHeight, bmp.rows);
 }
 
 
