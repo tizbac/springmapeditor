@@ -15,7 +15,7 @@ void main() {
 	if  (mode == 1 )
 	{
 		//diffuse = vec4(metalvalue,1.0);
-		diffuse = vec4(max(vec3(color)/3.0,metalvalue*vec4(0.0,0.7,0,0)),1) * max(dot(L, N), 0.0);
+		diffuse = vec4(max(color/3.0, metalvalue * vec3(0.0,0.7,0.0)),1.0) * max(dot(L, N), 0.0);
 	}else if ( mode == 0){
 		diffuse = vec4(color,1) * max(dot(L, N), 0.0);
 	}else{

@@ -1,6 +1,5 @@
 #include <SDL3/SDL.h>
 #include <GL/glew.h>
-#include "font.h"
 class engine{
     public:
 	int height;
@@ -36,7 +35,6 @@ class engine{
 	bool quit;
 	const bool *keys;
 	public:
-	oglstr textengine;
 	SDL_Window* screen;
 	SDL_GLContext context;
 	bool getkey(SDL_Scancode key);

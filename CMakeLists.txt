@@ -17,21 +17,11 @@ find_package(SDL3 CONFIG REQUIRED)
 add_subdirectory(ftgl)
 
 add_executable(editor
-    3doobject.cpp
-    2dstuff.cpp
     engine.cxx
-    fbo.cc
     float3.cpp
-    font.cxx
-    glFont.cpp
     light.cxx
     main.cc
-    matset.cxx
-    nv_dds.cpp
     shader.cxx
-    texture.cxx
-    wavefront.cxx
-    Map/MetalMap.cpp
     Map/ReadMap.cpp
     Map/SMF/BFGroundTextures.cpp
     Map/SMF/SmfReadMap.cpp

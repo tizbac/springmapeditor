@@ -55,9 +55,6 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 	}
 	// GLEW can leave a benign GL_INVALID_ENUM behind on core-ish contexts.
 	while (glGetError() != GL_NO_ERROR) {}
-	this->textengine.initfont();
-	this->textengine.disph = height;
-	this->textengine.dispw = width;
 	glShadeModel(GL_SMOOTH);
 	glEnable(GL_DEPTH_TEST);//Abilita il controllo della profondità
 	//glEnable(GL_CULL_FACE);//Abilita il rendering solo per le facce frontali

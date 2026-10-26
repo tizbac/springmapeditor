@@ -23,43 +23,30 @@
  */
 #define flt(x) ((float)x)
 #include <stdlib.h>
-#ifdef WIN32
+#ifdef _WIN32
 #include <windows.h>
 #endif
 #include <stdio.h>
 #include <string.h>
+#include <signal.h>
 #include <unistd.h>
 #include <string>
+#include <algorithm>
 #include "GlobalStuff.h"
 #include <stdarg.h>
 #include <float.h>
 #include "engine.h"
 
-#include "wavefront.h"
-#include "texture.h"
 #include <cmath>
 #include "light.h"
 #include "shader.h"
-#include "2dstuff.h"
-//#include "glFont.h"
-#include "matset.h"
-#include "3doobject.hpp"
 #include <GL/glew.h>
 #include "Map/SMF/BFGroundTextures.h"
 #include "Map/SMF/SmfReadMap.h"
 #include "Map/ReadMap.h"
 #include <FTGL/ftgl.h>
-#define f(x,y) 0.3*cos(x*x+y*y+t)     // original function
-#define fx(x,y) -0.6*x*sin(x*x+y*y+t) // partial derivative in x
-#define fy(x,y) -0.6*y*sin(x*x+y*y+t) // partial derivative in y
-engine* Main;
-mesh test;
-mesh cube;
-matset mat;
+static engine* Main;
 light l0;
-shader sh2;
-texture pr;
-shader ward;
 gst * gs;
 float rxx = 0;
 float mappx;
@@ -68,7 +55,6 @@ bool lastmr = false;
 float ryy = 93.3;
 float ts = 6.0;
 int mode;
-bool eraseh;
 double mx = 0;
 double my = 0;
 double mz = 0;
@@ -78,7 +64,6 @@ float pxx = -20.37;
 unsigned char * tmpdata;
 float pyy = 14.39;
 float pzz = 4.32;
-int lastchange = 0;
 unsigned char  *metalmap ;
 float brushsize = 1.0;
 GLint * landscapecache;
@@ -162,8 +147,6 @@ float GetH(CSmfReadMap* map,int x, int y)
   float f = map->heightmap[i];
   if ( f > 20)
     f = 0.0;
-  /*if ( eraseh )
-     map->heightmap[i] = FLT_MIN;*/
   return f;
 
 }
@@ -205,8 +188,6 @@ float GetM(CSmfReadMap* map,int x_, int y_)
 
 
     f = 0.0;}
-  /*if ( eraseh )
-     map->heightmap[i] = FLT_MIN;*/
   return f;
 
 }
@@ -431,27 +412,6 @@ void drawsquare(int x, int y,CSmfReadMap* map,CBFGroundTextures* tex,float tiles
   glBindTexture(GL_TEXTURE_2D,0);
 			  Main->PopTransform();
 }
-void progresscallback(int prg,std::string desc)
-{
-   //printf("Progress: %i %s\n",prg,desc.c_str());
-  glDisable(GL_LIGHTING);
-  Main->OrthoMode();
-  Main->clearscreen(0.0,0.0,0.0,1.0);
-  glColor3f(1.0,1.0,1.0);
-  glBindTexture(GL_TEXTURE_2D,0);
-  //draw2drect(0,0,100,100);
-  draw2drect(Main->width,Main->height,Main->width/4,Main->height/4*1.8,Main->width-Main->width/4,Main->height-Main->height/4*1.8,false);
-  glColor3f(0.0,1.0,1.0);
-  int x2 = 0;
-  int l = Main->width/2-5;
-  
-  x2 = Main->width/4+5+l*(flt(prg)/100.0);//(Main->width-Main->width/4-5)*(flt(prg)/100.0);
-  draw2drect(Main->width,Main->height,Main->width/4+5,Main->height/4*1.8+5,x2,Main->height-Main->height/4*1.8-5,true);
-  Main->display();
-  Main->NormalMode();
-  glEnable(GL_LIGHTING);
- 
-}
 static std::string FindFont()
 {
 	const char* env = getenv("SPRINGMAPEDITOR_FONT");
@@ -492,6 +452,14 @@ static std::string FindAsset(const char* name)
 	return name;
 }
 
+static volatile sig_atomic_t interrupt_requested = 0;
+
+static void handle_interrupt(int sig)
+{
+	(void)sig;
+	interrupt_requested = 1;
+}
+
 int main(int argc, char ** argv)
 {
 	char txt[1024];
@@ -518,7 +486,6 @@ int main(int argc, char ** argv)
 		smfpathstorage = (slash == std::string::npos) ? "." : mapfile.substr(0, slash);
 	}
 	const char * smfpath = smfpathstorage.c_str();
-	eraseh = false;
 	Main = new engine;
 	gs = new gst;
 	std::string fontpath = FindFont();
@@ -534,8 +501,6 @@ int main(int argc, char ** argv)
 		                "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
 	}
 
-	//CglFont * font;
-	//font = new CglFont(32, 255, "Vera.ttf", 1.0, 128, 128);
 	if (!Main->Init3d(1024,768,8,false))
 	{
 		fprintf(stderr, "Failed to initialize the video subsystem.\n");
@@ -644,7 +609,10 @@ int main(int argc, char ** argv)
 	Main->SetCameraPos(0,0,-10);
 	pxx = -map->width*8/1024;
 	pzz = -map->height*8/1024;
-	while (quite == false && !Main->quit)
+	signal(SIGINT, handle_interrupt);
+	signal(SIGTERM, handle_interrupt);
+
+	while (quite == false && !Main->quit && !interrupt_requested)
 	{
 	    
 	    //printf("Begin frame\n");
@@ -708,42 +676,11 @@ int main(int argc, char ** argv)
 		
 		if ( Main->getkey(SDL_SCANCODE_L))
 		{
-          if (mode == 1)
-          {
-		  glDrawPixels(mbi.width,mbi.height,GL_LUMINANCE,GL_UNSIGNED_BYTE,metalmap);
-          }else if (mode == 0)
-          {
-              glDrawPixels(gs->mapx+1,gs->mapy+1,GL_LUMINANCE,GL_FLOAT,map->heightmap);
-          }
-		  eraseh = true;
-		}else{
-		  eraseh = false;
-	}
-
-		/*if ( Main->getkey('g'))
-		{
-			rxx += 20 / Main->getfps();
+			if (mode == 1)
+				glDrawPixels(mbi.width,mbi.height,GL_LUMINANCE,GL_UNSIGNED_BYTE,metalmap);
+			else if (mode == 0)
+				glDrawPixels(gs->mapx+1,gs->mapy+1,GL_LUMINANCE,GL_FLOAT,map->heightmap);
 		}
-		if ( Main->getkey('h'))
-		{
-			ryy += 20 / Main->getfps();
-		}
-		if ( Main->getkey('j'))
-		{
-			rzz += 20 / Main->getfps();
-		}
-		if ( Main->getkey('b'))
-		{
-			rxx -= 20 / Main->getfps();
-		}
-		if ( Main->getkey('n'))
-		{
-			ryy -= 20 / Main->getfps();
-		}
-		if ( Main->getkey('m'))
-		{
-			rzz -= 20 / Main->getfps();
-		}*/
 		
         if ( Main->getkey(SDL_SCANCODE_A) and brushsize < 100)
 		{
@@ -1206,7 +1143,8 @@ Main->PushTransform(0,0,0,90.0,0,0);
         {
             for ( x = 0; x < maph.mapx+1;x++)
             {
-                hmapdata[y*(maph.mapx+1)+x] = (unsigned short)(USHRT_MAX*max(0.0,min(1.0,(double)map->heightmap[y*(maph.mapx+1)+x])));
+                double h = max(0.0, min(1.0, (double)map->heightmap[y*(maph.mapx+1)+x]));
+                hmapdata[y*(maph.mapx+1)+x] = (unsigned short)min(65535.0, 65536.0*h);
             }
         }
         printf("Done converting heightmap\n");
@@ -1218,9 +1156,20 @@ Main->PushTransform(0,0,0,90.0,0,0);
         free(hmapdata);
         printf("Save complete\n");
 	}
-    //free(landscapecache);
-    free(landscapecachestatus);
-    printf("Exiting\n");
+
+	int squares = map->height * 8 / 1024 * map->width * 8 / 1024;
+	glDeleteTextures(squares, metaltexture);
+	glDeleteLists(landscapecache[0], squares);
+	free(metaltexture);
+	free(landscapecache);
+	free(tmpdata);
+	map->FreeInfoMap("metal", metalmap);
+	free(landscapecachestatus);
+	delete tex;
+	delete map;
+	delete Main;
+	delete gs;
+	printf("Exiting\n");
    
 	return 0;
 }
