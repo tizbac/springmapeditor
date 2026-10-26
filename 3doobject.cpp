@@ -131,6 +131,7 @@ bool _3doobject::loadfromfile(char * filename)
 	
 	
 	glEndList();
+	return true;
 }
 void _3doobject::Render(float x,float y,float z,float rx,float ry,float rz,float scale)
 {

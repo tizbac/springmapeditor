@@ -14,14 +14,15 @@ char *file2string(const char *path)
 	fseek(fd,0,SEEK_END);
 	len = ftell(fd);
 	printf("Shader %ld bytes\n",len);
-	if(!(str = (char*)malloc(len*sizeof(char))))
+	if(!(str = (char*)malloc((len+1)*sizeof(char))))
 	{
 		printf("Cannot allocate memory");
+		fclose(fd);
 		return NULL;
 	}
 	fseek(fd,0,SEEK_SET);
 	r = fread(str,sizeof(char),len,fd);
-	str[r-1] = '\0';
+	str[r] = '\0';
 	fclose(fd);
 	return str;
 }
@@ -37,7 +38,7 @@ void PrintLog(GLuint obj)
 		printf("%s\n",infoLog);
 }
 
-void shader::createfromfiles(char * fsfile,char * vsfile)
+void shader::createfromfiles(const char * fsfile,const char * vsfile)
 {
 	const char * fss = file2string(fsfile);
 	const char * vss = file2string(vsfile);
@@ -64,7 +65,7 @@ void shader::useshader(void)
 {
 	glUseProgram(this->program);
 }
-void shader::setuniformfloat(char *uniname,float value)
+void shader::setuniformfloat(const char *uniname,float value)
 {
 	glUseProgram(this->program);
 	GLint loc;
@@ -72,7 +73,7 @@ void shader::setuniformfloat(char *uniname,float value)
 	glUniform1f(loc,value);
 	//glUseProgram(0);
 }
-void shader::setuniform2to4f(char *uniname,float* value)
+void shader::setuniform2to4f(const char *uniname,float* value)
 {
 	glUseProgram(this->program);
 	GLint loc;
@@ -88,7 +89,7 @@ void shader::setuniform2to4f(char *uniname,float* value)
 	glUseProgram(0);
 
 }
-void shader::setuniformsampler(char *uniname,int value)
+void shader::setuniformsampler(const char *uniname,int value)
 {
 	glUseProgram(this->program);
 	GLint loc;
@@ -96,7 +97,7 @@ void shader::setuniformsampler(char *uniname,int value)
 	glUniform1i(loc,value);
 
 }
-void shader::setuniformint(char *uniname,int value)
+void shader::setuniformint(const char *uniname,int value)
 {
     glUseProgram(this->program);
 	GLint loc;

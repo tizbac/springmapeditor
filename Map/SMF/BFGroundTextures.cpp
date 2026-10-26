@@ -61,9 +61,14 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 			name += ch;
 		}
 		
-		name = string(rm->mapf->cpath) + name;
+		// The map directory is normally passed with a trailing slash, but accept
+		// both cases and make sure the separator is present.
+		string dir = rm->mapf->cpath;
+		if (!dir.empty() && dir[dir.size() - 1] != '/' && dir[dir.size() - 1] != '\\')
+			dir += '/';
+		name = dir + name;
 		fakevfs * tileFile= new fakevfs;
-		tileFile->f = fopen(name.c_str(),"r");
+		tileFile->f = fopen(name.c_str(),"rb");
 		tileFile->Seek(0);
 
 		
@@ -72,6 +77,7 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 			printf("Couldnt find tile file %s\n", name.c_str());
 			memset(&tiles[curTile * SMALL_TILE_SIZE], 0xaa, size * SMALL_TILE_SIZE);
 			curTile += size;
+			delete tileFile;
 			continue;
 		}
 
@@ -91,6 +97,7 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 			tileFile->Read(&tiles[curTile * SMALL_TILE_SIZE], SMALL_TILE_SIZE);
 			curTile++;
 		}
+		delete tileFile;
 	}
 
 	printf("Reading tile map\n");

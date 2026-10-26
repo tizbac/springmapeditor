@@ -13,6 +13,8 @@ public:
 	int fsize;
 string cpath;
 	FILE * f;
+	fakevfs() : cseek(0), fsize(0), f(NULL) {}
+	~fakevfs() { if (f) fclose(f); }
 	int Read(void * dest,int size){
 	if (!this->f)
 		{
@@ -22,8 +24,7 @@ string cpath;
 	fread(dest,size,1,this->f);
 	this->cseek = this->cseek + size;
 	fseek(this->f,this->cseek,SEEK_SET);
-
-
+	return 0;
 }
 	int Seek(int pos){
 	//printf("Seek(%i);\n",pos);
@@ -45,11 +46,12 @@ string cpath;
 	
 	this->cseek = pos;
 	fseek(this->f,this->cseek,SEEK_SET);
-
+	return 0;
 }
 	int Close(void){
 	//printf("Closing file\n");
 	fclose(this->f);
+	return 0;
 }
 	int GetPos(void){return cseek;}
 

@@ -1,27 +1,60 @@
-cmake_minimum_required(VERSION 2.6)
-project ( SpringMapEditor )
-SUBDIRS( ftgl )
-IF (MINGW)
-	if (NOT COMPLETE_BUILD)
-		SET(MINGWLIBS ${CMAKE_SOURCE_DIR}/mingwlibs CACHE PATH "Location of the mingwlibs (you can't build windows executables without them)")
-		
-		### add mingwlibs to link- and include-directories
-		INCLUDE_DIRECTORIES(${MINGWLIBS}/include ${MINGWLIBS}/include/SDL ${MINGWLIBS}/include/gtk-2.0 ${MINGWLIBS}/include/glib-2.0 
-		${MINGWLIBS}/include/atk-1.0 ${MINGWLIBS}/lib/glib-2.0/include ${MINGWLIBS}/include/pango-1.0 ${MINGWLIBS}/lib/gtk-2.0/include ${MINGWLIBS}/include/cairo ./ftgl)
-		LINK_DIRECTORIES(${MINGWLIBS}/lib ${MINGWLIBS}/dll ${MINGWLIBS}/bin)
-		#LIST(APPEND winlibs glu32 ilu devil )
-	endif (NOT COMPLETE_BUILD)
-ELSE (MINGW)
-FIND_PACKAGE(Freetype REQUIRED)
-find_package(SDL2 REQUIRED)
-ENDIF (MINGW)
-INCLUDE_DIRECTORIES(. Map ./ftgl /usr/include/freetype2 ${SDL2_INCLUDE_DIRS})
-LINK_DIRECTORIES ( . ./ftgl )
-ADD_EXECUTABLE ( editor 3doobject.cpp  engine.cxx  font.cxx  light.cxx  main.cc  matset.cxx  shader.cxx  texture.cxx  wavefront.cxx Map/MetalMap.cpp Map/ReadMap.cpp
-Map/SMF/BFGroundTextures.cpp glFont.h glFont.cpp
-Map/SMF/SmfReadMap.cpp fbo.cc float3.cpp nv_dds.cpp 2dstuff.cpp)
-IF (MINGW)
-TARGET_LINK_LIBRARIES ( editor ftglS SDL glew32 glu32 opengl32 freetype)
-ELSE (MINGW)
-TARGET_LINK_LIBRARIES ( editor ftglS  GL GLU GLEW freetype ${SDL2_LIBRARIES})
-ENDIF (MINGW)
+cmake_minimum_required(VERSION 3.16)
+project(SpringMapEditor LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+find_package(OpenGL REQUIRED)
+find_package(GLEW REQUIRED)
+find_package(Freetype REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
+
+add_subdirectory(ftgl)
+
+add_executable(editor
+    3doobject.cpp
+    2dstuff.cpp
+    engine.cxx
+    fbo.cc
+    float3.cpp
+    font.cxx
+    glFont.cpp
+    light.cxx
+    main.cc
+    matset.cxx
+    nv_dds.cpp
+    shader.cxx
+    texture.cxx
+    wavefront.cxx
+    Map/MetalMap.cpp
+    Map/ReadMap.cpp
+    Map/SMF/BFGroundTextures.cpp
+    Map/SMF/SmfReadMap.cpp
+)
+
+target_include_directories(editor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/Map
+)
+
+target_link_libraries(editor PRIVATE
+    ftglS
+    OpenGL::GL
+    OpenGL::GLU
+    GLEW::GLEW
+    Freetype::Freetype
+    SDL3::SDL3
+)
+
+# Shaders are loaded relative to the working directory at runtime.
+add_custom_command(TARGET editor POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_CURRENT_SOURCE_DIR}/groundshader.vert
+            ${CMAKE_CURRENT_SOURCE_DIR}/groundshader.frag
+            $<TARGET_FILE_DIR:editor>
+)

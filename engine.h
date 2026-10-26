@@ -1,6 +1,5 @@
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <GL/glew.h>
-//#include <SDL_opengl_glext.h>
 #include "font.h"
 class engine{
     public:
@@ -31,14 +30,16 @@ class engine{
 	bool right;
 	float frustum[6][4];
 	SDL_Event ev;
-	Uint32 cleartime;
-	Uint32 rendertime;
+	Uint64 cleartime;
+	Uint64 rendertime;
 	bool fullscreen;
-	const Uint8 *keys;
+	bool quit;
+	const bool *keys;
 	public:
 	oglstr textengine;
 	SDL_Window* screen;
-	bool getkey(char key);
+	SDL_GLContext context;
+	bool getkey(SDL_Scancode key);
 	float getfps(void);
 	void ExtractFrustum();
 	bool Init3d(int width = 800,int height = 600,int bpp = 24,bool fullscreen = false);

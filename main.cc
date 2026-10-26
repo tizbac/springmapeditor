@@ -27,6 +27,9 @@
 #include <windows.h>
 #endif
 #include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <string>
 #include "GlobalStuff.h"
 #include <stdarg.h>
 #include <float.h>
@@ -145,16 +148,6 @@ class v3{
             return sqrt(x*x+y*y);
         }
 };
-GLfloat * colorrgba(GLfloat r,GLfloat g,GLfloat b,GLfloat a = 1.0)
-{
-	GLfloat clr[3];
-	clr[0] = r;
-	clr[1] = g;
-	clr[2] = b;
-	clr[3] = a;
-	return clr;
-}
-
 float GetH(CSmfReadMap* map,int x, int y)
 {
   if (x < 0 or y < 0){
@@ -435,7 +428,7 @@ void drawsquare(int x, int y,CSmfReadMap* map,CBFGroundTextures* tex,float tiles
         break;
 
   }
-  glBindTexture(GL_TEXTURE_2D,NULL);
+  glBindTexture(GL_TEXTURE_2D,0);
 			  Main->PopTransform();
 }
 void progresscallback(int prg,std::string desc)
@@ -459,29 +452,108 @@ void progresscallback(int prg,std::string desc)
   glEnable(GL_LIGHTING);
  
 }
+static std::string FindFont()
+{
+	const char* env = getenv("SPRINGMAPEDITOR_FONT");
+	if (env && *env && access(env, R_OK) == 0)
+		return env;
+
+	static const char* candidates[] = {
+		"Vera.ttf",
+		"assets/Vera.ttf",
+		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+		"/usr/share/fonts/TTF/DejaVuSans.ttf",
+		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+	};
+	for (const char* path : candidates)
+	{
+		if (access(path, R_OK) == 0)
+			return path;
+	}
+	return "";
+}
+
+// Look for a runtime asset next to the working directory first, then next to
+// the executable. Returns the original name if it cannot be found.
+static std::string FindAsset(const char* name)
+{
+	if (access(name, R_OK) == 0)
+		return name;
+
+	const char* base = SDL_GetBasePath();
+	if (base)
+	{
+		std::string path = base;
+		SDL_free((void*)base);
+		path += name;
+		if (access(path.c_str(), R_OK) == 0)
+			return path;
+	}
+	return name;
+}
+
 int main(int argc, char ** argv)
 {
 	char txt[1024];
 	bool quite = false;
 	float p0,p1,p2,p3,cmod;
+	bool checkOnly = (argc > 1 && strcmp(argv[1], "--check") == 0);
+	if (!checkOnly && argc < 2)
+	{
+		fprintf(stderr, "Usage: %s <map.smf> [map directory]\n", argv[0]);
+		fprintf(stderr, "       %s --check    (initialize video/OpenGL and exit)\n", argv[0]);
+		return 1;
+	}
 	mode = 0; //Main texture
-	const char * smffile = argv[1];
-	const char * smfpath = argv[2];
+	const char * smffile = checkOnly ? NULL : argv[1];
+	std::string smfpathstorage;
+	if (argc > 2 && !checkOnly)
+	{
+		smfpathstorage = argv[2];
+	}
+	else if (!checkOnly)
+	{
+		std::string mapfile = smffile;
+		size_t slash = mapfile.find_last_of("/\\");
+		smfpathstorage = (slash == std::string::npos) ? "." : mapfile.substr(0, slash);
+	}
+	const char * smfpath = smfpathstorage.c_str();
 	eraseh = false;
 	Main = new engine;
 	gs = new gst;
-	FTGLPixmapFont font("Vera.ttf");
-
-	font.FaceSize(12);
+	std::string fontpath = FindFont();
+	bool haveFont = !fontpath.empty();
+	FTGLPixmapFont font(haveFont ? fontpath.c_str() : "");
+	if (haveFont)
+	{
+		font.FaceSize(12);
+	}
+	else
+	{
+		fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
+		                "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
+	}
 
 	//CglFont * font;
 	//font = new CglFont(32, 255, "Vera.ttf", 1.0, 128, 128);
-	Main->Init3d(1024,768,8,false);
+	if (!Main->Init3d(1024,768,8,false))
+	{
+		fprintf(stderr, "Failed to initialize the video subsystem.\n");
+		return 1;
+	}
+	if (checkOnly)
+	{
+		printf("SDL video driver: %s\n", SDL_GetCurrentVideoDriver());
+		printf("OpenGL vendor:    %s\n", glGetString(GL_VENDOR));
+		printf("OpenGL renderer:  %s\n", glGetString(GL_RENDERER));
+		printf("OpenGL version:   %s\n", glGetString(GL_VERSION));
+		Main->Terminate();
+		return 0;
+	}
 	//SDL_WM_GrabInput(SDL_GRAB_ON);
 	//font->TryConstructFont("Luxy.ttf",32,255,0.027f);
 	l0.lightinit(GL_LIGHT0,-50,50,50,1,1,1,1);
 
-	CReadMap * mapl;
 	float sqsize;
 	float hval = 0;
 	float tilesize = 64.0;
@@ -489,10 +561,18 @@ int main(int argc, char ** argv)
 	float tilesize2 = 16.0;
 	CSmfReadMap* map;
 	
-	map = (CSmfReadMap*)(mapl->LoadMap(smffile,smfpath));
+	map = (CSmfReadMap*)(CReadMap::LoadMap(smffile,smfpath));
+	if (map == NULL)
+	{
+		fprintf(stderr, "Failed to load map '%s' from '%s'\n", smffile, smfpath);
+		Main->Terminate();
+		return 1;
+	}
     int mw = map->width;
     int mh = map->height;
-	groundshader.createfromfiles("./groundshader.frag","./groundshader.vert");
+	std::string fragmentShader = FindAsset("groundshader.frag");
+	std::string vertexShader = FindAsset("groundshader.vert");
+	groundshader.createfromfiles(fragmentShader.data(), vertexShader.data());
 	//cout << gluErrorString(glGetError()) << endl;
 	landscapecache = (GLint*)malloc(map->height*8/1024*map->width*8/1024*sizeof(GLint));
 	landscapecachestatus = (char*)malloc(map->height*8/1024*map->width*8/1024+1);
@@ -559,12 +639,12 @@ int main(int argc, char ** argv)
 	
 	float cval = 0.0;
 
-	SDL_SetRelativeMouseMode(SDL_TRUE);
+	SDL_SetWindowRelativeMouseMode(Main->screen, true);
 
 	Main->SetCameraPos(0,0,-10);
 	pxx = -map->width*8/1024;
 	pzz = -map->height*8/1024;
-	while (quite == false)
+	while (quite == false && !Main->quit)
 	{
 	    
 	    //printf("Begin frame\n");
@@ -602,7 +682,7 @@ int main(int argc, char ** argv)
 		}
 		for ( int i = 0; i < 9; i++)
         {
-            if (Main->getkey('0'+i))
+            if (Main->getkey((SDL_Scancode)(SDL_SCANCODE_0 + i)))
             {
                 for ( int i2 = 0; i2 < map->height*8/1024*map->width*8/1024; i2++)
                     landscapecachestatus[i2] = 'u';
@@ -617,7 +697,7 @@ int main(int argc, char ** argv)
 		{
 			pxx -= 20 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey('e' ))
+		if ( Main->getkey(SDL_SCANCODE_E))
 		{
 			pyy -= 20 / max(1.0,(double)Main->getfps());
 		}
@@ -626,7 +706,7 @@ int main(int argc, char ** argv)
 			pzz -= 20 / max(1.0,(double)Main->getfps());
 		}
 		
-		if ( Main->getkey('l' ))
+		if ( Main->getkey(SDL_SCANCODE_L))
 		{
           if (mode == 1)
           {
@@ -640,32 +720,32 @@ int main(int argc, char ** argv)
 		  eraseh = false;
 	}
 
-		/*if ( Main->getkey('g' ))
+		/*if ( Main->getkey('g'))
 		{
 			rxx += 20 / Main->getfps();
 		}
-		if ( Main->getkey('h' ))
+		if ( Main->getkey('h'))
 		{
 			ryy += 20 / Main->getfps();
 		}
-		if ( Main->getkey('j' ))
+		if ( Main->getkey('j'))
 		{
 			rzz += 20 / Main->getfps();
 		}
-		if ( Main->getkey('b' ))
+		if ( Main->getkey('b'))
 		{
 			rxx -= 20 / Main->getfps();
 		}
-		if ( Main->getkey('n' ))
+		if ( Main->getkey('n'))
 		{
 			ryy -= 20 / Main->getfps();
 		}
-		if ( Main->getkey('m' ))
+		if ( Main->getkey('m'))
 		{
 			rzz -= 20 / Main->getfps();
 		}*/
 		
-        if ( Main->getkey(SDL_SCANCODE_A ) and brushsize < 100)
+        if ( Main->getkey(SDL_SCANCODE_A) and brushsize < 100)
 		{
 			brushsize += 5 / max(1.0,(double)Main->getfps());
 		}
@@ -673,30 +753,30 @@ int main(int argc, char ** argv)
 		{
 			brushsize -= 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey(SDL_SCANCODE_C ) and hval < FLT_MAX)
+		if ( Main->getkey(SDL_SCANCODE_C) and hval < FLT_MAX)
 		{
 			hval += 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey(SDL_SCANCODE_X ) and brushsize > 0)
+		if ( Main->getkey(SDL_SCANCODE_X) and brushsize > 0)
 		{
 			hval -= 5 / max(1.0,(double)Main->getfps());
 		}
-		if ( Main->getkey(SDL_SCANCODE_B ) and brushsize > 0)
+		if ( Main->getkey(SDL_SCANCODE_B) and brushsize > 0)
 		{
 			hval = cval;
 		}
 		
 		if ( Main->mouseleft )
 		{
-            SDL_ShowCursor(0);
+            SDL_HideCursor();
 	    
             ryy += (float)Main->mouserelx/10.0;
             rzz += (float)Main->mouserely/10.0;
             //printf("Mouse xrel=%i Mouse yrel=%i\n",Main->mouserelx,Main->mouserely);
 		}else{
-		    SDL_ShowCursor(1);
+		    SDL_ShowCursor();
 		}
-		if ( Main->getkey('t' ) and ts > 4)
+		if ( Main->getkey(SDL_SCANCODE_T) and ts > 4)
 		{
 
 			ts -= 1;
@@ -704,7 +784,7 @@ int main(int argc, char ** argv)
                 landscapecachestatus[i] = 'u';
 
 		}
-		if ( Main->getkey('y' ) and ts < 10)
+		if ( Main->getkey(SDL_SCANCODE_Y) and ts < 10)
 		{
 			ts += 1;
 			for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
@@ -712,7 +792,7 @@ int main(int argc, char ** argv)
 		}
 
 
-		if ( Main->getkey('w'))
+		if ( Main->getkey(SDL_SCANCODE_W))
 		{
 			glPolygonMode(GL_FRONT,GL_LINE);
 			glPolygonMode(GL_BACK,GL_LINE);
@@ -722,7 +802,7 @@ int main(int argc, char ** argv)
 		}
 
 		//glColorMaterial(GL_FRONT_AND_BACK,GL_DIFFUSE);
-		if ( Main->getkey('f'))
+		if ( Main->getkey(SDL_SCANCODE_F))
 		{
 			Main->ToggleFullScreen();
 
@@ -742,11 +822,11 @@ Main->PushTransform(0,0,0,90.0,0,0);
               groundshader.useshader();
               //printf("drawsquare(%i,%i,map,tex,pow(2,%f));\n",x,y,ts);
 			  drawsquare(x_,y_,map,tex,pow(2,ts));
-			  glUseProgram(NULL);
+			  glUseProgram(0);
 			}
 		}
 
-		glBindTexture(GL_TEXTURE_2D,NULL);
+		glBindTexture(GL_TEXTURE_2D,0);
 		glEnable(GL_BLEND);		// Turn Blending On
         //glDisable(GL_DEPTH_TEST);
         glBlendFunc(GL_SRC_ALPHA,GL_ONE);
@@ -769,7 +849,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
         glPolygonMode(GL_FRONT,GL_LINE);
         glPolygonMode(GL_BACK,GL_LINE);
         glBegin(GL_POLYGON);
-        glColor3f(Main->getkey('s') ? 0.0 : 1.0,Main->getkey('s') ? 1.0 : 0.0,0.0);
+        glColor3f(Main->getkey(SDL_SCANCODE_S) ? 0.0 : 1.0,Main->getkey(SDL_SCANCODE_S) ? 1.0 : 0.0,0.0);
         mappx = mx*1024/2;
         mappy = mz*1024/2;
         int hmapx = mappx/8;
@@ -841,7 +921,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
 			    {
 				cv2 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay);
 				
@@ -872,7 +952,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
 			    {
 				cv2 = GetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay);
                                 SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,cv2+0.1);
@@ -905,7 +985,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
 			    {
 				cv2 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay);
 				
@@ -936,7 +1016,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
 			    {
 				cv2 = GetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay);
                                 SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,cv2-0.1);
@@ -971,7 +1051,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
                                 SetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay,hval);
                             else
                             {
@@ -1011,7 +1091,7 @@ Main->PushTransform(0,0,0,90.0,0,0);
                             if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
                             {
                            // printf("Seth\n");
-                            if ( not Main->getkey('s') ) // Smooth
+                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
                                 SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,hval);
                             else
                             {
@@ -1057,104 +1137,85 @@ Main->PushTransform(0,0,0,90.0,0,0);
             lastchange = time(NULL);
         }*/
 		sprintf(txt,"%f FPS XPosition = %f,YPosition = %f,ZPosition = %f,RotX= %f,RotY= %f,RotZ = %f %i Polygons",Main->getfps(),pxx,pyy,pzz,rxx,ryy,rzz,poly);
-		font.Render(txt);
+		if (haveFont)
+		{
+			font.Render(txt);
+		}
 		poly = 0;
 
 		sprintf(txt,"Brushsize: %f , MAPX = %f , MAPY = %f, Height = %f , Set height = %f",brushsize,mappx,mappy,cval,hval);
-		font.Render(txt,-1,FTPoint(0,20));
+		if (haveFont)
+		{
+			font.Render(txt,-1,FTPoint(0,20));
+		}
 		sprintf(txt,"Cache status = %s",landscapecachestatus);
-        font.Render(txt,-1,FTPoint(0,40));
+		if (haveFont)
+		{
+			font.Render(txt,-1,FTPoint(0,40));
+		}
 		Main->display();
 	}
 	
-	SDL_SetRelativeMouseMode(SDL_FALSE);
+	SDL_SetWindowRelativeMouseMode(Main->screen, false);
 	Main->Terminate();
 	bool save = false;
 	
 	while ( true )
 	{
         printf("Save changes? [y/n] ");
-        char ans = getchar();
+        fflush(stdout);
+        int ans = getchar();
         if (ans == 'y')
         {
             save = true;
-
             break;
         }
-        if (ans == 'n')
+        if (ans == 'n' || ans == EOF)
         {
             save = false;
             break;
         }
-	
 	}
 	if ( save )
 	{
-        printf("Writing new maps to smf file...");
+        printf("Writing new maps to smf file...\n");
         MapHeader maph;
-        FILE * mapfout;
-        mapfout = fopen(smffile,"r+");
+        FILE * mapfout = fopen(smffile,"rb+");
         if ( ! mapfout )
-        	{
-        		printf("Error, cannot open the map file to save data\n");
-        		exit(1);
-        	}
-        fseek(mapfout,0,SEEK_END);
-        int filesize = ftell(mapfout);
-        char * data = (char*)malloc(filesize);
-        fseek(mapfout,0,SEEK_SET);
-        fread(data,filesize,1,mapfout);
-        memcpy(&maph,data,sizeof(maph));
+        {
+        	printf("Error, cannot open the map file to save data\n");
+        	return 1;
+        }
+        if (fread(&maph,sizeof(maph),1,mapfout) != 1)
+        {
+        	printf("Error, cannot read the map header\n");
+        	fclose(mapfout);
+        	return 1;
+        }
         printf("Header Magic: %s\n",maph.magic);
         printf("metalmapPtr: %i      MAPX=%i    MAPY=%i\n",maph.metalmapPtr,maph.mapx,maph.mapy);
         printf("typemapPtr: %i      MAPX=%i    MAPY=%i\n",maph.typeMapPtr,maph.mapx,maph.mapy);
         printf("heightmapPtr: %i      MAPX=%i    MAPY=%i\n",maph.heightmapPtr,maph.mapx,maph.mapy);
         printf("minimapPtr: %i      MAPX=%i    MAPY=%i\n",maph.minimapPtr,maph.mapx,maph.mapy);
 
-   
-
-
-        //ilSaveImage("test.png");
-
-      /*  unsigned short* hmapdata = (unsigned short*)ilGetData();
-        int datasize = (maph.mapx+1)*(maph.mapy+1)*sizeof(unsigned short);
-        ilSaveImage("hmap.png");
-        fseek(mapfout,maph.heightmapPtr,SEEK_SET);
-        fwrite(hmapdata,datasize,1,mapfout);*/
         unsigned int datasize = (maph.mapx+1)*(maph.mapy+1)*sizeof(unsigned short);
-        unsigned short *hmapdata;
-        printf("(%i+1)*(%i+1)*%i=%i\n",maph.mapx,maph.mapy,sizeof(unsigned short),datasize);
-        hmapdata = (unsigned short*)malloc(datasize);
-        int li = 0;
+        printf("(%i+1)*(%i+1)*%i=%i\n",maph.mapx,maph.mapy,(int)sizeof(unsigned short),datasize);
+        unsigned short *hmapdata = (unsigned short*)malloc(datasize);
         printf("Converting height map...\n");
         for ( y = 0; y < maph.mapy+1;y++)
         {
             for ( x = 0; x < maph.mapx+1;x++)
             {
-		//printf("%f ->",map->heightmap[y*(maph.mapx+1)+x]);
                 hmapdata[y*(maph.mapx+1)+x] = (unsigned short)(USHRT_MAX*max(0.0,min(1.0,(double)map->heightmap[y*(maph.mapx+1)+x])));
-		//printf("%u ",hmapdata[y*(maph.mapx+1)+x]);
             }
-
-
-
         }
-	/*Main->clearscreen();
-	glDrawPixels(maph.mapx+1,maph.mapy+1,GL_LUMINANCE,GL_UNSIGNED_SHORT,hmapdata);
-	Main->display();
-	
-	Sleep(5000);
-	 */
         printf("Done converting heightmap\n");
-	fclose(mapfout);
-	mapfout = fopen(smffile,"rb+");
-	if( not mapfout )
-	  printf("ERROR: Cannot open smf file for writing!\n");
         fseek(mapfout,maph.heightmapPtr,SEEK_SET);
         fwrite(hmapdata,datasize,1,mapfout);
         fseek(mapfout,maph.metalmapPtr,SEEK_SET);
         fwrite(metalmap,map->width/2*map->height/2,1,mapfout);
         fclose(mapfout);
+        free(hmapdata);
         printf("Save complete\n");
 	}
     //free(landscapecache);
@@ -1163,22 +1224,4 @@ Main->PushTransform(0,0,0,90.0,0,0);
    
 	return 0;
 }
-#ifdef WIN32
 
-
-int WINAPI WinMain(HINSTANCE hInstance,	    // handle to current instance
-		   HINSTANCE hPrevInstance, // handle to previous instance
-		   LPSTR lpCmdLine,	    // pointer to command line
-		   int nCmdShow)
-{
-
-
-        int r = 0;
-
-        r=  main(__argc,__argv);
-        return r;
-}
-
-
-
-#endif

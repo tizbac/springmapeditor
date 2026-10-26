@@ -4,10 +4,11 @@
 bool texture::LoadFromFile(char * filename)
 {
 	printf("Loading Texture %s...",filename);
-	this->image = SDL_LoadBMP(filename);
+	SDL_IOStream* src = SDL_IOFromFile(filename, "rb");
+	this->image = src ? SDL_LoadBMP_IO(src, true) : NULL;
 	if (this->image == NULL)
 	{
-		printf("\033[21;35mFAILED!\n\033[21;39m");
+		printf("\033[21;35mFAILED! %s\n\033[21;39m", SDL_GetError());
 		return false;
 	}
 	printf("\033[21;33mOK\n\033[21;39m");
@@ -47,7 +48,7 @@ bool texture::Update(void)
 }
 bool texture::DestroyTexture(void)
 {
-	SDL_FreeSurface(this->image);
+	SDL_DestroySurface(this->image);
 	glDeleteTextures(1,&this->id);
 	return true;
 

@@ -160,21 +160,18 @@
 
 //#include "StdAfx.h"
 
-#if defined(WIN32)
+#if defined(_WIN32)
 #  include <windows.h>
 #  define GET_EXT_POINTER(name, type) \
       name = (type)wglGetProcAddress(#name)
-#elif defined(UNIX) || defined(unix)
-#define GLX_GLXEXT_PROTOTYPES
-//#  include <GL/glx.h>
-#  define GET_EXT_POINTER(name, type) \
-      name = (type)glXGetProcAddressARB((const GLubyte*)#name)
 #elif defined(__APPLE__)
 // Mac OpenGL headers are 1.4/1.5 Compatable already!
 #  define GET_EXT_POINTER(name, type)
 #else
-#  define GET_EXT_POINTER(name, type)
-#  error unknown platform
+#  define GLX_GLXEXT_PROTOTYPES
+#  include <GL/glx.h>
+#  define GET_EXT_POINTER(name, type) \
+      name = (type)glXGetProcAddressARB((const GLubyte*)#name)
 #endif
 
 /*#ifdef MACOS
@@ -194,7 +191,7 @@
 #include "byteorder.h"
 
 // Moved because of conflicts with GLEW.
-#if defined(UNIX) || defined(unix)
+#if !defined(_WIN32) && !defined(__APPLE__)
 #  include <GL/glx.h>
 #endif
 

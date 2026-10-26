@@ -1,5 +1,6 @@
 #include "engine.h"
 #include <cmath>
+#include <cstdio>
 bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 {
 	
@@ -8,24 +9,52 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 	this->height = height;
 	this->width = width;
 	this->fullscreen = fullscreen;
-	SDL_Init(SDL_INIT_VIDEO);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); 
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0); 
-	this->screen = SDL_CreateWindow("Spring Map Editor", SDL_WINDOWPOS_UNDEFINED,
-                          SDL_WINDOWPOS_UNDEFINED,this->width,this->height,SDL_WINDOW_OPENGL);//Avvia SDL
-	SDL_GLContext context = SDL_GL_CreateContext(this->screen);
-	
-	if (this->fullscreen)
-		SDL_SetWindowFullscreen(this->screen, this->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	this->quit = false;
 
+	if (!SDL_Init(SDL_INIT_VIDEO))
+	{
+		fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+		return false;
+	}
+
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
 	SDL_GL_SetAttribute(SDL_GL_RED_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,5);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,16);
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
-	
-	glewInit();//Avvia GLEW per poter utilizzare GLSL
+
+	this->screen = SDL_CreateWindow("Spring Map Editor", this->width, this->height,
+	                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+	if (this->screen == NULL)
+	{
+		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
+		return false;
+	}
+
+	this->context = SDL_GL_CreateContext(this->screen);
+	if (this->context == NULL)
+	{
+		fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
+		return false;
+	}
+
+	SDL_GL_SetSwapInterval(1);
+
+	if (this->fullscreen)
+		SDL_SetWindowFullscreen(this->screen, true);
+
+	glewExperimental = GL_TRUE;
+	GLenum glewStatus = glewInit();
+	if (glewStatus != GLEW_OK)
+	{
+		fprintf(stderr, "glewInit failed: %s\n", glewGetErrorString(glewStatus));
+		return false;
+	}
+	// GLEW can leave a benign GL_INVALID_ENUM behind on core-ish contexts.
+	while (glGetError() != GL_NO_ERROR) {}
 	this->textengine.initfont();
 	this->textengine.disph = height;
 	this->textengine.dispw = width;
@@ -59,6 +88,7 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
     glPolygonOffset(-3.0f, -3.0f);
 	glLoadIdentity();
+	return true;
 }
 void engine::ExtractFrustum()
 {
@@ -193,77 +223,63 @@ void engine::clearscreen(float r,float g,float b,float a)
 	while ( SDL_PollEvent(&this->ev)){
         switch (this->ev.type)
         {
-            case SDL_MOUSEMOTION:
-                this->mousex = ev.motion.x;
-                this->mousey = ev.motion.y;
-                this->mouserelx = ev.motion.xrel;
-                this->mouserely = ev.motion.yrel;
-                break;
-	    
-            case SDL_MOUSEBUTTONDOWN:
-                this->mouseleft = ev.button.button == SDL_BUTTON_LEFT && ev.button.state == SDL_PRESSED;
-                this->mouseright = ev.button.button == SDL_BUTTON_RIGHT && ev.button.state == SDL_PRESSED;
-                break;
-			case SDL_MOUSEWHEEL:
-				this->wup = ev.wheel.y > 0;
-				this->wdown = ev.wheel.y < 0;
-					
-				
-            case SDL_MOUSEBUTTONUP:
-                this->mouseleft = ev.button.button == SDL_BUTTON_LEFT && ev.button.state == SDL_PRESSED;
-                this->mouseright = ev.button.button == SDL_BUTTON_RIGHT && ev.button.state == SDL_PRESSED;
+            case SDL_EVENT_MOUSE_MOTION:
+                this->mousex = (int)ev.motion.x;
+                this->mousey = (int)ev.motion.y;
+                this->mouserelx = (int)ev.motion.xrel;
+                this->mouserely = (int)ev.motion.yrel;
                 break;
 
-             case SDL_KEYDOWN:
-             // printf("keydown %i\n" , ev.key.keysym.sym);
-              switch(ev.key.keysym.sym){
-                case SDLK_LEFT:
-                   this->left = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_RIGHT:
-                  this->right = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_UP:
-                  this->up = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_DOWN:
-                  this->down = ev.key.state == SDL_PRESSED;
-                  break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                if (ev.button.button == SDL_BUTTON_LEFT)
+                    this->mouseleft = ev.button.down;
+                else if (ev.button.button == SDL_BUTTON_RIGHT)
+                    this->mouseright = ev.button.down;
+                else if (ev.button.button == SDL_BUTTON_MIDDLE)
+                    this->mousecenter = ev.button.down;
+                break;
+
+            case SDL_EVENT_MOUSE_WHEEL:
+                this->wup = ev.wheel.y > 0;
+                this->wdown = ev.wheel.y < 0;
+                break;
+
+            case SDL_EVENT_KEY_DOWN:
+            case SDL_EVENT_KEY_UP:
+                switch (ev.key.scancode) {
+                case SDL_SCANCODE_LEFT:
+                    this->left = ev.key.down;
+                    break;
+                case SDL_SCANCODE_RIGHT:
+                    this->right = ev.key.down;
+                    break;
+                case SDL_SCANCODE_UP:
+                    this->up = ev.key.down;
+                    break;
+                case SDL_SCANCODE_DOWN:
+                    this->down = ev.key.down;
+                    break;
                 default:
-                  break;}
-            case SDL_KEYUP:
-             // printf("keydown %i\n" , ev.key.keysym.sym);
-              switch(ev.key.keysym.sym){
-                case SDLK_LEFT:
-                   this->left = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_RIGHT:
-                  this->right = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_UP:
-                  this->up = ev.key.state == SDL_PRESSED;
-                  break;
-                case SDLK_DOWN:
-                  this->down = ev.key.state == SDL_PRESSED;
-                  break;
-                default:
-                  break;}
+                    break;
+                }
+                break;
 
+            case SDL_EVENT_QUIT:
+                this->quit = true;
+                break;
 
+            default:
+                break;
         }
 	}
 
 }
-bool engine::getkey(char key)
+bool engine::getkey(SDL_Scancode key)
 {
 
 	this->keys = SDL_GetKeyboardState(NULL);
-	if (this->keys[key])
-	{
-		return true;
-	}else{
-		return false;
-	}
+	return this->keys[key];
 }
 void engine::display(void)
 {
@@ -272,8 +288,17 @@ void engine::display(void)
 }
 bool engine::Terminate(void)
 {
+	if (this->context)
+	{
+		SDL_GL_DestroyContext(this->context);
+		this->context = NULL;
+	}
+	if (this->screen)
+	{
+		SDL_DestroyWindow(this->screen);
+		this->screen = NULL;
+	}
 	SDL_Quit();
-	//dWorldDestroy(this->world);
 	return true;
 }
 bool engine::ToggleFullScreen(void)
@@ -281,8 +306,8 @@ bool engine::ToggleFullScreen(void)
 	if (this->screen == NULL)
 		return false;
 
-	if (this->fullscreen)
-		SDL_SetWindowFullscreen(this->screen, this->fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+	this->fullscreen = !this->fullscreen;
+	SDL_SetWindowFullscreen(this->screen, this->fullscreen);
 	return true;
 }
 float engine::getfps(void)
@@ -360,19 +385,11 @@ void engine::SetCameraRotation(float x,float y,float z)
 }
 int engine::GetMouseX()
 {
-
-
-
-
+	return this->mousex;
 }
 int engine::GetMouseY()
 {
-
-
-
-
-
-
+	return this->mousey;
 }
 void engine::OrthoMode()
 {

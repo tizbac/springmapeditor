@@ -335,6 +335,7 @@ const char *CSmfReadMap::GetFeatureType (int typeID)
 {
 	/*assert (typeID >= 0 && typeID < featureHeader.numFeatureType);
 	return featureTypes[typeID].c_str();*/
+	return "";
 }
 
 unsigned char *CSmfReadMap::GetInfoMap (const std::string& name, MapBitmapInfo* bmInfo)

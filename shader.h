@@ -6,9 +6,9 @@ class shader{
 	GLuint vs;
 	public:
 	void useshader(void);
-	void setuniformfloat(char *uniname,float value);
-	void setuniform2to4f(char *uniname,float* value);
-	void setuniformsampler(char *uniname,int value);
-	void setuniformint(char *uniname,int value);
-	void createfromfiles(char * fsfile,char * vsfile);
+	void setuniformfloat(const char *uniname,float value);
+	void setuniform2to4f(const char *uniname,float* value);
+	void setuniformsampler(const char *uniname,int value);
+	void setuniformint(const char *uniname,int value);
+	void createfromfiles(const char * fsfile,const char * vsfile);
 };
