@@ -45,13 +45,14 @@ class FlatRenderer {
 	void text(const Font &font, const char *str, float x, float baselineY, float r, float g,
 	          float b, float a);
 
-	// Adds a point to the closed polyline drawn by flushLines.
-	void linePoint(float x, float y, float z, float r, float g, float b, float a);
+	// Adds a line segment to the batch drawn by flushLines.
+	void lineSegment(float x0, float y0, float z0, float x1, float y1, float z1, float r, float g,
+	                 float b, float a);
 
 	// Uploads and draws the collected quads.
 	void flush(const Mat4 &matrix, GLuint texture);
 
-	// Draws the collected polyline as GL_LINE_LOOP.
+	// Draws the collected segments as GL_LINES, on top of the 3D scene.
 	void flushLines(const Mat4 &matrix);
 
 	void addHit(int id, float x0, float y0, float x1, float y1);

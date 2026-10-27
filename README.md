@@ -65,7 +65,8 @@ The bottom fifth of the window is the editor bar. Panels from left to right:
 - **BRUSH**: the brush shape (`O` circle, `[]` square, `/\` triangle), size and
   falloff (`-`/`+`, `F-`/`F+`).
 - **VALUE**: the value the brush paints and `Pick` to take it from the map.
-- **COLOUR**: red, green and blue sliders for fixed colour painting.
+- **COLOUR**: the current colour, `Pal` for a full palette (24 hues times 7
+  shades plus a grey ramp) and red, green and blue sliders for exact values.
 - **Right panel**: `Rect` switches to drag-rectangle fill, `Help` toggles the key
   list, `Map` cycles the metal/height map overlay, `Quit` exits and `Dir` opens
   the texture directory picker.
@@ -89,7 +90,7 @@ The same list is printed on screen while the editor runs (toggle it with `Help`)
 | `A` / `Z` | Larger / smaller brush |
 | `C` / `X` | Larger / smaller brush value |
 | `B` | Pick the ground value under the cursor as the brush value |
-| `S` | Smooth the ground instead of painting it |
+| `S` | Smooth the ground (average with the neighbours) instead of painting a value |
 | `P` | Cycle the brush shape (circle, square, triangle) |
 | `-` / `=` | Less / more brush falloff |
 | `0` – `3` | Mode: height, metal, texture, colour |
@@ -110,6 +111,10 @@ Ground tiles are drawn with multitexturing: the tile texture is blended with a
 paint layer that belongs to the big square it sits in. The paint layer has one
 texel per map square and stores the painted colour in RGB and the coverage in A.
 Strokes can be undone and redone per mouse stroke.
+
+Painting, metal map and height edits are uploaded while the stroke is being
+drawn, and a fast drag is filled in by stamping the brush along the cursor path,
+so the result is visible immediately and has no gaps.
 
 Give the editor a directory of images to paint with:
 

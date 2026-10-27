@@ -1,8 +1,9 @@
 /*
- * terrain.cxx - ground mesh built into a vertex buffer.
+ * terrain.cxx - ground mesh built into one vertex buffer per big square.
  */
 #include "terrain.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,17 @@
 #include "Map/GlobalStuff.h"
 #include "Map/SMF/BFGroundTextures.h"
 #include "Map/SMF/SmfReadMap.h"
+
+namespace {
+const int kDefaultLod = 6;
+const int kMinLod = 3;  // one quad per map square
+const int kMaxLod = 10; // one quad per big square
+// How large a quad should be on screen, in pixels. Used to pick the level of
+// detail of each square.
+const float kTargetQuadPixels = 3.0f;
+// Squares rebuilt per updateLods() call, so a big zoom change does not stall.
+const int kRebuildsPerCall = 12;
+} // namespace
 
 static float mapHeight(CSmfReadMap *map, int x, int y)
 {
@@ -63,27 +75,11 @@ bool Terrain::init()
 {
 	if (!shader.createFromFiles("ground.vert", "ground.frag"))
 		return false;
-
-	glGenVertexArrays(1, &vao);
-	glGenBuffers(1, &vbo);
-
-	glBindVertexArray(vao);
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, 0, nullptr, GL_STATIC_DRAW);
-
-	const GLsizei stride = 8 * sizeof(float);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (const void *)(3 * sizeof(float)));
-	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(6 * sizeof(float)));
-
-	glBindVertexArray(0);
 	return true;
 }
 
-void Terrain::buildSquare(int bx, int by, int lod, std::vector<float> &out)
+void Terrain::buildSquare(int bx, int by, int lod, const int neighbourLod[4],
+                          std::vector<float> &out)
 {
 	int sqsize = 1024 >> lod;
 	if (sqsize < 1)
@@ -92,14 +88,85 @@ void Terrain::buildSquare(int bx, int by, int lod, std::vector<float> &out)
 	const float quadWidth = 2.0f / (float)sqsize;
 	const int step = 128 / sqsize < 1 ? 1 : 128 / sqsize;
 
+	// Sample the four borders along the map grid, then let them follow the
+	// neighbour when it is coarser: a fine square and a coarse square do not
+	// share vertices along their border, so a fine border vertex that sits on
+	// the coarse neighbour's straight edge segment is what keeps the surfaces
+	// watertight.
+	const int baseX = bx * 128;
+	const int baseY = by * 128;
+
+	auto sampleFront = [&](int d) { return mapHeight(map, baseX + 1 + d, baseY - 1); };
+	auto sampleBack = [&](int d) { return mapHeight(map, baseX + 1 + d, baseY + 127); };
+	auto sampleLeft = [&](int d) { return mapHeight(map, baseX + 1, baseY - 1 + d); };
+	auto sampleRight = [&](int d) { return mapHeight(map, baseX + 129, baseY - 1 + d); };
+
+	std::vector<float> edgeFront((size_t)sqsize + 1, 0.0f), edgeBack((size_t)sqsize + 1, 0.0f);
+	std::vector<float> edgeLeft((size_t)sqsize + 1, 0.0f), edgeRight((size_t)sqsize + 1, 0.0f);
+	for (int i = 0; i <= sqsize; ++i)
+	{
+		int d = i * step;
+		edgeFront[(size_t)i] = sampleFront(d);
+		edgeBack[(size_t)i] = sampleBack(d);
+		edgeLeft[(size_t)i] = sampleLeft(d);
+		edgeRight[(size_t)i] = sampleRight(d);
+	}
+
+	auto snapEdge = [&](std::vector<float> &edge, int nLod, auto sample) {
+		if (nLod <= lod)
+			return;
+		int nSize = 1024 >> nLod;
+		if (nSize < 1)
+			nSize = 1;
+		int nStep = 128 / nSize;
+		if (nStep < 1)
+			nStep = 1;
+
+		for (int i = 0; i <= sqsize; ++i)
+		{
+			int d = i * step;
+			int k = d / nStep;
+			int frac = d - k * nStep;
+			float h0 = (float)sample(k * nStep);
+			float h1 = (float)sample((k + 1) * nStep);
+			edge[(size_t)i] = h0 + (h1 - h0) * (float)frac / (float)nStep;
+		}
+	};
+
+	snapEdge(edgeFront, neighbourLod[0], sampleFront);
+	snapEdge(edgeBack, neighbourLod[1], sampleBack);
+	snapEdge(edgeLeft, neighbourLod[2], sampleLeft);
+	snapEdge(edgeRight, neighbourLod[3], sampleRight);
+
 	for (int Y = 0; Y < sqsize; ++Y)
 	{
 		for (int X = 0; X < sqsize; ++X)
 		{
-			float z1 = mapHeight(map, bx * 128 + X * step + 1, by * 128 + Y * step - 1);
-			float z2 = mapHeight(map, bx * 128 + (X + 1) * step + 1, by * 128 + Y * step - 1);
-			float z3 = mapHeight(map, bx * 128 + (X + 1) * step + 1, by * 128 + (Y + 1) * step - 1);
-			float z4 = mapHeight(map, bx * 128 + X * step + 1, by * 128 + (Y + 1) * step - 1);
+			float z1 = mapHeight(map, baseX + X * step + 1, baseY + Y * step - 1);
+			float z2 = mapHeight(map, baseX + (X + 1) * step + 1, baseY + Y * step - 1);
+			float z3 = mapHeight(map, baseX + (X + 1) * step + 1, baseY + (Y + 1) * step - 1);
+			float z4 = mapHeight(map, baseX + X * step + 1, baseY + (Y + 1) * step - 1);
+
+			if (Y == 0)
+			{
+				z1 = edgeFront[(size_t)X];
+				z2 = edgeFront[(size_t)X + 1];
+			}
+			if (Y == sqsize - 1)
+			{
+				z4 = edgeBack[(size_t)X];
+				z3 = edgeBack[(size_t)X + 1];
+			}
+			if (X == 0)
+			{
+				z1 = edgeLeft[(size_t)Y];
+				z4 = edgeLeft[(size_t)Y + 1];
+			}
+			if (X == sqsize - 1)
+			{
+				z2 = edgeRight[(size_t)Y];
+				z3 = edgeRight[(size_t)Y + 1];
+			}
 
 			float x1 = (float)X * quadWidth;
 			float x2 = (float)(X + 1) * quadWidth;
@@ -140,115 +207,174 @@ void Terrain::buildSquare(int bx, int by, int lod, std::vector<float> &out)
 	}
 }
 
-void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures, const std::vector<int> &lod)
+void Terrain::uploadSquare(int index, int lod)
+{
+	BigSquare &sq = squares[(size_t)index];
+	int bx = (int)((size_t)index % (size_t)bigX);
+	int by = (int)((size_t)index / (size_t)bigX);
+
+	// Levels of the neighbours: front, back, left, right. A square that is finer
+	// than a neighbour snaps its border onto that neighbour's edge segments.
+	int neighbourLod[4] = {lod, lod, lod, lod};
+	if (by > 0)
+		neighbourLod[0] = squares[(size_t)(by - 1) * bigX + bx].lod;
+	if (by + 1 < bigY)
+		neighbourLod[1] = squares[(size_t)(by + 1) * bigX + bx].lod;
+	if (bx > 0)
+		neighbourLod[2] = squares[(size_t)by * bigX + bx - 1].lod;
+	if (bx + 1 < bigX)
+		neighbourLod[3] = squares[(size_t)by * bigX + bx + 1].lod;
+
+	std::vector<float> verts;
+	buildSquare(bx, by, lod, neighbourLod, verts);
+
+	if (!sq.vao)
+	{
+		glGenVertexArrays(1, &sq.vao);
+		glGenBuffers(1, &sq.vbo);
+	}
+
+	glBindVertexArray(sq.vao);
+	glBindBuffer(GL_ARRAY_BUFFER, sq.vbo);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)verts.size() * sizeof(float), verts.data(),
+	             GL_DYNAMIC_DRAW);
+
+	const GLsizei stride = 8 * sizeof(float);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (const void *)(3 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(6 * sizeof(float)));
+	glBindVertexArray(0);
+
+	sq.count = (int)(verts.size() / 8);
+	sq.lod = lod;
+
+	sq.cx0 = (float)(bx * 2);
+	sq.cz0 = (float)(by * 2);
+	sq.cx1 = (float)(bx * 2 + 2);
+	sq.cz1 = (float)(by * 2 + 2);
+	sq.cy0 = 0.0f;
+	sq.cy1 = 0.0f;
+	for (size_t k = 0; k < verts.size(); k += 8)
+	{
+		if (verts[k + 1] < sq.cy0)
+			sq.cy0 = verts[k + 1];
+		if (verts[k + 1] > sq.cy1)
+			sq.cy1 = verts[k + 1];
+	}
+}
+
+void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures_)
 {
 	map = map_;
+	textures = textures_;
 	bigX = textures->numBigSquaresX();
 	bigY = textures->numBigSquaresY();
 
-	vertices.clear();
-	squares.clear();
-	dirty.assign((size_t)bigX * bigY, 0);
-	squares.reserve((size_t)bigX * bigY);
-
-	std::vector<float> square;
-	for (int by = 0; by < bigY; ++by)
+	for (size_t i = 0; i < squares.size(); ++i)
 	{
-		for (int bx = 0; bx < bigX; ++bx)
-		{
-			size_t i = (size_t)by * bigX + bx;
-			int level = lod.size() > i ? lod[i] : 6;
-
-			square.clear();
-			buildSquare(bx, by, level, square);
-
-			BigSquare sq;
-			sq.first = (int)(vertices.size() / 8);
-			sq.count = (int)(square.size() / 8);
-			sq.lod = level;
-			sq.cx0 = (float)(bx * 2);
-			sq.cz0 = (float)(by * 2);
-			sq.cx1 = (float)(bx * 2 + 2);
-			sq.cz1 = (float)(by * 2 + 2);
-			sq.cy0 = 0.0f;
-			sq.cy1 = 0.0f;
-
-			// Widen the bounding box with the actual heights of the square.
-			for (size_t k = 0; k < square.size(); k += 8)
-			{
-				if (square[k + 1] < sq.cy0)
-					sq.cy0 = square[k + 1];
-				if (square[k + 1] > sq.cy1)
-					sq.cy1 = square[k + 1];
-			}
-
-			vertices.insert(vertices.end(), square.begin(), square.end());
-			squares.push_back(sq);
-		}
+		if (squares[i].vao)
+			glDeleteVertexArrays(1, &squares[i].vao);
+		if (squares[i].vbo)
+			glDeleteBuffers(1, &squares[i].vbo);
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices.size() * sizeof(float), vertices.data(),
-	             GL_STATIC_DRAW);
+	squares.assign((size_t)bigX * bigY, BigSquare());
+	dirty.assign((size_t)bigX * bigY, 0);
+
+	for (int i = 0; i < (int)squares.size(); ++i)
+		uploadSquare(i, kDefaultLod);
+
+	printf("Terrain: %dx%d big squares, level %d\n", bigX, bigY, kDefaultLod);
 }
 
 int Terrain::lodOf(int bx, int by) const
 {
 	if (bx < 0 || by < 0 || bx >= bigX || by >= bigY)
-		return 6;
+		return kDefaultLod;
 	return squares[(size_t)by * bigX + bx].lod;
 }
 
-bool Terrain::updateLods(const Mat4 &vp, int viewportWidth, int viewportHeight, int bias,
-                         std::vector<int> &lod)
+bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees, int bias)
 {
-	if (squares.empty() || viewportWidth < 1 || viewportHeight < 1)
+	if (squares.empty() || viewportHeight < 1)
 		return false;
 
-	(void)viewportHeight;
-	bool changed = false;
-	lod.resize(squares.size());
+	const float tanHalfFov = std::tan(fovDegrees * 3.14159265358979f / 360.0f);
+	const float pixelsPerUnitAtOne = (0.5f * (float)viewportHeight) / tanHalfFov;
+
+	struct Change {
+		float size;
+		int index;
+		int lod;
+	};
+	std::vector<Change> changes;
 
 	for (int by = 0; by < bigY; ++by)
 	{
 		for (int bx = 0; bx < bigX; ++bx)
 		{
-			// Project the centre of the square and the centre two units away and
-			// turn the difference into pixels: this is the size the square has on
-			// screen, which is what the level of detail should follow.
+			size_t i = (size_t)by * bigX + bx;
+			BigSquare &sq = squares[i];
+
+			// Depth along the view direction, not the distance to the eye and
+			// not the projected extent: both make the mesh change while the
+			// camera only rotates.
 			float cx = bx * 2.0f + 1.0f;
 			float cz = by * 2.0f + 1.0f;
-			int level = 10;
+			float camZ = view.m[2] * cx + view.m[6] * 0.0f + view.m[10] * cz + view.m[14];
+			float depth = -camZ;
 
-			float w0 = vp.m[11] * cz + vp.m[15] + vp.m[3] * cx;
-			float w1 = vp.m[11] * cz + vp.m[15] + vp.m[3] * (cx + 2.0f);
-			if (w0 > 1e-4f && w1 > 1e-4f)
+			float size = 0.0f;
+			int want = kMaxLod;
+			if (depth > 0.01f)
 			{
-				float x0 = (vp.m[0] * cx + vp.m[8] * cz + vp.m[12]) / w0;
-				float x1 = (vp.m[0] * (cx + 2.0f) + vp.m[8] * cz + vp.m[12]) / w1;
-				float pixels = std::fabs(x1 - x0) * 0.5f * (float)viewportWidth;
-				if (pixels > 1.0f)
-				{
-					// One quad should end up roughly 16 pixels wide: a big square
-					// has 1024 / 2^level quads per side.
-					float levelF = 14.0f - std::log2(pixels);
-					level = (int)std::floor(levelF) + bias;
-				}
+				size = 2.0f * pixelsPerUnitAtOne / depth;
+				float levelF = 10.0f + std::log2(kTargetQuadPixels) - std::log2(size) + (float)bias;
+				want = (int)std::floor(levelF);
+				if (want < kMinLod)
+					want = kMinLod;
+				if (want > kMaxLod)
+					want = kMaxLod;
 			}
 
-			if (level < 4)
-				level = 4;
-			if (level > 10)
-				level = 10;
-
-			size_t i = (size_t)by * bigX + bx;
-			lod[i] = level;
-			if (level != squares[i].lod)
-				changed = true;
+			sq.screenSize = size;
+			if (want != sq.lod)
+				changes.push_back({size, (int)i, want});
 		}
 	}
 
-	return changed;
+	if (changes.empty())
+		return false;
+
+	// Refine the squares that cover the most screen first, and only a few per
+	// call so a zoom does not stall the frame.
+	std::sort(changes.begin(), changes.end(),
+	          [](const Change &a, const Change &b) { return a.size > b.size; });
+
+	int done = 0;
+	for (size_t c = 0; c < changes.size(); ++c)
+	{
+		if (done >= kRebuildsPerCall)
+			break;
+		int index = changes[c].index;
+		int bx = index % bigX;
+		int by = index / bigX;
+
+		// Neighbours snap their border onto this square, so they have to be
+		// rebuilt as well when its level changes.
+		markDirty(bx - 1, by);
+		markDirty(bx + 1, by);
+		markDirty(bx, by - 1);
+		markDirty(bx, by + 1);
+
+		squares[(size_t)index].lod = changes[c].lod;
+		uploadSquare(index, changes[c].lod);
+		++done;
+	}
+	return true;
 }
 
 void Terrain::markDirty(int bx, int by)
@@ -263,47 +389,16 @@ void Terrain::flushDirty()
 	if (squares.empty())
 		return;
 
-	std::vector<float> square;
-
-	// The array buffer binding is not part of the vertex array object, so bind
-	// it explicitly: without this the upload silently targets another buffer and
-	// height edits never reach the screen.
-	glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
 	for (size_t i = 0; i < squares.size(); ++i)
 	{
 		if (!dirty[i])
 			continue;
-		int bx = (int)(i % (size_t)bigX);
-		int by = (int)(i / (size_t)bigX);
-
-		square.clear();
-		buildSquare(bx, by, squares[i].lod, square);
-
-		BigSquare &sq = squares[i];
-		size_t offset = (size_t)sq.first * 8 * sizeof(float);
-		glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset,
-		                (GLsizeiptr)square.size() * sizeof(float), square.data());
-
-		vertices.resize((size_t)sq.first * 8 + square.size());
-		for (size_t k = 0; k < square.size(); ++k)
-			vertices[(size_t)sq.first * 8 + k] = square[k];
-
-		sq.cy0 = 0.0f;
-		sq.cy1 = 0.0f;
-		for (size_t k = 0; k < square.size(); k += 8)
-		{
-			if (square[k + 1] < sq.cy0)
-				sq.cy0 = square[k + 1];
-			if (square[k + 1] > sq.cy1)
-				sq.cy1 = square[k + 1];
-		}
-
+		uploadSquare((int)i, squares[i].lod);
 		dirty[i] = 0;
 	}
 }
 
-void Terrain::draw(CBFGroundTextures *textures, GLuint metalTexture, const Mat4 &vp, int mode,
+void Terrain::draw(CBFGroundTextures *ground, GLuint metalTexture, const Mat4 &vp, int mode,
                    int metalWidth, int metalHeight, float lightX, float lightY, float lightZ,
                    const float frustum[6][4])
 {
@@ -318,8 +413,6 @@ void Terrain::draw(CBFGroundTextures *textures, GLuint metalTexture, const Mat4 
 	shader.set("mode", mode);
 	shader.set("lightDir", lightX, lightY, lightZ);
 
-	glBindVertexArray(vao);
-
 	for (size_t i = 0; i < squares.size(); ++i)
 	{
 		const BigSquare &sq = squares[i];
@@ -330,12 +423,12 @@ void Terrain::draw(CBFGroundTextures *textures, GLuint metalTexture, const Mat4 
 			continue;
 
 		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, textures->squares[by * bigX + bx].texture);
+		glBindTexture(GL_TEXTURE_2D, ground->squares[by * bigX + bx].texture);
 
 		glActiveTexture(GL_TEXTURE1);
 		glBindTexture(GL_TEXTURE_2D, metalTexture);
 
-		GLuint paint = textures->paintTexture(bx, by);
+		GLuint paint = ground->paintTexture(bx, by);
 		glActiveTexture(GL_TEXTURE2);
 		glBindTexture(GL_TEXTURE_2D, paint);
 		shader.set("hasPaint", paint ? 1 : 0);
@@ -344,7 +437,8 @@ void Terrain::draw(CBFGroundTextures *textures, GLuint metalTexture, const Mat4 
 		           (float)(by * 64) / (float)metalHeight);
 		shader.set("uMetalScale", 128.0f / (float)metalWidth, 128.0f / (float)metalHeight);
 
-		glDrawArrays(GL_TRIANGLES, sq.first, sq.count);
+		glBindVertexArray(sq.vao);
+		glDrawArrays(GL_TRIANGLES, 0, sq.count);
 	}
 
 	glActiveTexture(GL_TEXTURE0);

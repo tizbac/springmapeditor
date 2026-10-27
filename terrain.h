@@ -1,11 +1,12 @@
 /*
- * terrain.h - the ground mesh as a vertex buffer, drawn with the ground shader.
+ * terrain.h - the ground mesh, one vertex buffer per big square.
  *
  * The map is made of "big squares" of 128x128 map squares, each of which has
- * its own ground texture and paint layer, so the mesh is stored as one range of
- * triangles per big square and only the squares whose heights changed are
- * regenerated. Every big square picks its own level of detail from how large it
- * is on screen, see Terrain::updateLods().
+ * its own ground texture and paint layer. Giving every square its own buffer
+ * means a height edit or a level of detail change only re-uploads the squares
+ * that are actually affected. A square's level of detail follows how large it
+ * is on screen, which is derived from its distance along the view direction so
+ * that rotating the camera does not change the mesh.
  */
 #ifndef TERRAIN_H
 #define TERRAIN_H
@@ -24,18 +25,15 @@ class Terrain {
   public:
 	bool init();
 
-	// (Re)builds the whole mesh. `lod` holds one level of detail per big square,
-	// row by row. The level is the exponent the old renderer used: a big square
-	// is subdivided into 1024 / 2^lod quads per side, so a bigger exponent is a
-	// coarser mesh.
-	void build(CSmfReadMap *map, CBFGroundTextures *textures, const std::vector<int> &lod);
+	// Builds the mesh for the whole map at a middle level of detail.
+	void build(CSmfReadMap *map, CBFGroundTextures *textures);
 
-	// Fills `lod` with the level of detail each square should use, derived from
-	// how large the square is on screen. Levels are clamped to [4, 10] and offset
-	// by `bias`, so a lower bias gives a finer mesh. Returns true when any level
-	// differs from the mesh that is currently built.
-	bool updateLods(const Mat4 &vp, int viewportWidth, int viewportHeight, int bias,
-	                std::vector<int> &lod);
+	// Refines the level of detail of the squares from their apparent size.
+	// Levels are clamped to [3, 10] (level 3 is one quad per map square) and
+	// shifted by `bias`, where a negative bias is finer. A few squares are
+	// rebuilt per call, so this can be called every frame. Returns true when
+	// anything was rebuilt.
+	bool updateLods(const Mat4 &view, int viewportHeight, float fovDegrees, int bias);
 
 	void markDirty(int bx, int by);
 	// Regenerates the dirty big squares and uploads them to the GPU.
@@ -50,29 +48,29 @@ class Terrain {
 		return !squares.empty();
 	}
 
-	// Level of detail of the square, for the HUD/debug output.
 	int lodOf(int bx, int by) const;
 
   private:
 	struct BigSquare {
-		int first;           // index of the first vertex in `vertices`
-		int count;           // number of vertices
-		int lod;             // 1024 / 2^lod quads per side
+		GLuint vao = 0;
+		GLuint vbo = 0;
+		int count = 0;
+		int lod = 6;         // 1024 / 2^lod quads per side
 		float cx0, cy0, cz0; // bounding box, world space
 		float cx1, cy1, cz1;
+		float screenSize = 0.0f; // approximate width on screen, in pixels
 	};
 
-	void buildSquare(int bx, int by, int lod, std::vector<float> &out);
+	void buildSquare(int bx, int by, int lod, const int neighbourLod[4], std::vector<float> &out);
+	void uploadSquare(int index, int lod);
 
 	Shader shader;
 	CSmfReadMap *map = nullptr;
+	CBFGroundTextures *textures = nullptr;
 	int bigX = 0, bigY = 0;
 
-	std::vector<float> vertices;
 	std::vector<BigSquare> squares;
 	std::vector<char> dirty;
-	GLuint vao = 0;
-	GLuint vbo = 0;
 };
 
 #endif // TERRAIN_H

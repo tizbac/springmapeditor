@@ -105,9 +105,11 @@ void FlatRenderer::text(const Font &font, const char *str, float x, float baseli
 	font.appendText(quads, str, x, baselineY, r, g, b, a);
 }
 
-void FlatRenderer::linePoint(float x, float y, float z, float r, float g, float b, float a)
+void FlatRenderer::lineSegment(float x0, float y0, float z0, float x1, float y1, float z1, float r,
+                               float g, float b, float a)
 {
-	pushVertex(lines, x, y, z, 0.0f, 0.0f, r, g, b, a);
+	pushVertex(lines, x0, y0, z0, 0.0f, 0.0f, r, g, b, a);
+	pushVertex(lines, x1, y1, z1, 0.0f, 0.0f, r, g, b, a);
 }
 
 void FlatRenderer::flush(const Mat4 &matrix, GLuint texture)
@@ -147,13 +149,9 @@ void FlatRenderer::flushLines(const Mat4 &matrix)
 	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)lines.size() * sizeof(float), lines.data(),
 	             GL_DYNAMIC_DRAW);
 
-	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-	glDisable(GL_DEPTH_TEST);
 	glBindVertexArray(vao);
-	glDrawArrays(GL_LINE_LOOP, 0, (GLsizei)(lines.size() / kFloatsPerVertex));
+	glDrawArrays(GL_LINES, 0, (GLsizei)(lines.size() / kFloatsPerVertex));
 	glBindVertexArray(0);
-	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-	glEnable(GL_DEPTH_TEST);
 
 	lines.clear();
 }

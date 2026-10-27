@@ -521,9 +521,6 @@ void CBFGroundTextures::LoadSquare(int x, int y, int level)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	// The tile file only carries four levels; without this the texture is
-	// incomplete down to 1x1 and samples as black.
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
 	if (map->anisotropy != 0.0f)
 		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, map->anisotropy);
 
@@ -560,6 +557,12 @@ void CBFGroundTextures::LoadSquare(int x, int y, int level)
 		glCompressedTexImage2D(GL_TEXTURE_2D, mip, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
 		                       size * size / 2, buf.data());
 	}
+
+	// The tile file stops at 128x128. Generate the remaining levels so the
+	// texture is complete down to 1x1: without them the sampler clamps to the
+	// smallest level when the square is far away and the ground turns into
+	// speckle noise.
+	glGenerateMipmap(GL_TEXTURE_2D);
 
 	square->texLevel = 0;
 }

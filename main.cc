@@ -70,10 +70,13 @@ enum Action {
 	ACT_PICKER_NEXT,
 	ACT_PICKER_UP,
 	ACT_PICKER_CLOSE,
+	ACT_PALETTE_OPEN,
+	ACT_PALETTE_CLOSE,
 
 	ACT_TEXTURE_BASE = 1000, // + index in the texture list
 	ACT_COLOUR_BASE = 2000,  // + 0 red, 1 green, 2 blue
-	ACT_PICKER_BASE = 3000   // + index in the current directory listing
+	ACT_PICKER_BASE = 3000,  // + index in the current directory listing
+	ACT_PALETTE_BASE = 10000 // + index in the colour palette
 };
 
 static const char *modeNames[] = {"height", "metal", "texture", "colour"};
@@ -111,8 +114,7 @@ static float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
 static bool orbiting = false;
 
 // brush
-static int detail = 5; // lower is a finer mesh
-static std::vector<int> terrainLods;
+static int detail = 6;         // lower is a finer mesh
 static float brushsize = 1.0f; // 1.0 = 64 map squares radius
 static float hval = 0.0f;      // height/metal value the brush applies
 static float falloff = 1.0f;   // 1 = hard edge, 3 = very soft
@@ -130,6 +132,66 @@ static int debugView = 0; // 0 none, 1 metal, 2 height
 static double mx = 0, my = 0, mz = 0;
 static double cval = 0.0;
 static bool painting = false;
+
+static bool paletteVisible = false;
+
+// Preset colours: one row per shade, the last row is a grey ramp.
+static const int kPaletteCols = 24;
+static const int kPaletteRows = 8;
+
+static void hsvToRgb(float h, float s, float v, unsigned char out[3])
+{
+	float c = v * s;
+	float x = c * (1.0f - fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f));
+	float m = v - c;
+	float r = 0.0f, g = 0.0f, b = 0.0f;
+	int sector = (int)(h * 6.0f) % 6;
+	switch (sector)
+	{
+	case 0:
+		r = c;
+		g = x;
+		break;
+	case 1:
+		r = x;
+		g = c;
+		break;
+	case 2:
+		g = c;
+		b = x;
+		break;
+	case 3:
+		g = x;
+		b = c;
+		break;
+	case 4:
+		r = x;
+		b = c;
+		break;
+	default:
+		r = c;
+		b = x;
+		break;
+	}
+	out[0] = (unsigned char)((r + m) * 255.0f);
+	out[1] = (unsigned char)((g + m) * 255.0f);
+	out[2] = (unsigned char)((b + m) * 255.0f);
+}
+
+static void paletteColour(int index, unsigned char out[3])
+{
+	int row = index / kPaletteCols;
+	int col = index % kPaletteCols;
+	if (row >= kPaletteRows - 1)
+	{
+		unsigned char v = (unsigned char)(col * 255 / (kPaletteCols - 1));
+		out[0] = out[1] = out[2] = v;
+		return;
+	}
+	float h = (float)col / (float)kPaletteCols;
+	float v = 1.0f - (float)row * 0.12f;
+	hsvToRgb(h, 1.0f, v, out);
+}
 
 static int picker = PICK_NONE;
 static std::string pickerDir;
@@ -331,10 +393,13 @@ static void applyAt(int x, int y, double w)
 		float target;
 		if (smooth)
 		{
+			// Move the square towards the average of its neighbours, not
+			// towards the brush value.
 			float avg = (GetH(map, x - 1, y) + GetH(map, x + 1, y) + GetH(map, x, y - 1) +
 			             GetH(map, x, y + 1)) /
 			            4.0f;
-			target = avg * (1.0f - (float)w) + hval * (float)w;
+			float cur = GetH(map, x, y);
+			target = cur + (avg - cur) * (float)w;
 		} else
 		{
 			float cur = GetH(map, x, y);
@@ -351,7 +416,8 @@ static void applyAt(int x, int y, double w)
 			float avg = (GetM(map, x - 2, y) + GetM(map, x + 2, y) + GetM(map, x, y - 2) +
 			             GetM(map, x, y + 2)) /
 			            4.0;
-			SetM(map, x, y, avg * (1.0 - (float)w) + hval * (float)w);
+			float cur = GetM(map, x, y);
+			SetM(map, x, y, cur + (avg - cur) * (double)w);
 		} else
 		{
 			float cur = GetM(map, x, y);
@@ -511,10 +577,10 @@ static void doRedo()
 	printf("Redo: %d entries\n", (int)s.index.size());
 }
 
-static void applyBrush()
+static void applyBrushAt(double cx, double cz)
 {
-	int centreX = (int)(mx * 64.0);
-	int centreY = (int)(mz * 64.0);
+	int centreX = (int)(cx * 64.0);
+	int centreY = (int)(cz * 64.0);
 	int r = (int)(brushsize * 64.0) + 1;
 
 	if (r <= 0)
@@ -528,6 +594,59 @@ static void applyBrush()
 				continue;
 			applyAt(centreX + dx, centreY + dy, w);
 		}
+}
+
+// The stroke is drawn as a chain of brush stamps between where the cursor was
+// on the previous frame and where it is now, otherwise a fast drag would leave
+// gaps between the stamps.
+static void paintStrokeSegment()
+{
+	static double lastX = 0.0, lastZ = 0.0;
+	static bool started = false;
+
+	if (!painting)
+	{
+		painting = true;
+		started = false;
+		commitStroke();
+	}
+
+	if (!started)
+	{
+		applyBrushAt(mx, mz);
+		started = true;
+		lastX = mx;
+		lastZ = mz;
+		return;
+	}
+
+	double dx = mx - lastX;
+	double dz = mz - lastZ;
+	double dist = sqrt(dx * dx + dz * dz);
+	double spacing = std::max(0.02, (double)brushsize * 0.25);
+
+	// A long jump is the pick moving to another part of the map, not a stroke.
+	if (dist > 4.0)
+	{
+		applyBrushAt(mx, mz);
+	} else
+	{
+		int steps = (int)(dist / spacing);
+		if (steps < 1)
+		{
+			applyBrushAt(mx, mz);
+		} else
+		{
+			for (int i = 1; i <= steps; ++i)
+			{
+				double t = (double)i / (double)steps;
+				applyBrushAt(lastX + dx * t, lastZ + dz * t);
+			}
+		}
+	}
+
+	lastX = mx;
+	lastZ = mz;
 }
 
 static void fillRectangle(double ax, double az, double bx, double bz)
@@ -673,26 +792,14 @@ static std::string parentDirectory(const std::string &dir)
 	return parent;
 }
 
-// Recomputes the per square level of detail from how large the squares are on
-// screen. The mesh is rebuilt only when a level actually changed, and at most a
-// few times per second so a continuous zoom does not stall the editor.
-static void refreshTerrainLods(bool force)
+// Refines the per square level of detail from how large each square is on
+// screen. Only the squares whose level actually changed are rebuilt, a few per
+// frame, so it is cheap enough to call every frame.
+static void refreshTerrainLods()
 {
-	if (!terrain.built() || !map || terrainLods.empty())
+	if (!terrain.built() || !Main)
 		return;
-
-	static unsigned lastTick = 0;
-	unsigned now = SDL_GetTicks();
-	if (!force && now - lastTick < 150)
-		return;
-	lastTick = now;
-
-	std::vector<int> next = terrainLods;
-	if (terrain.updateLods(Main->vp, Main->width, Main->height - Main->barHeight, detail - 6, next))
-	{
-		terrainLods = next;
-		terrain.build(map, tex, terrainLods);
-	}
+	terrain.updateLods(Main->view, Main->height - Main->barHeight, 60.0f, detail - 6);
 }
 
 static void loadMap(const std::string &path)
@@ -747,8 +854,7 @@ static void loadMap(const std::string &path)
 	}
 	rebuildMetalTexture();
 
-	terrainLods.assign((size_t)bigSquaresX() * bigSquaresY(), 6);
-	terrain.build(map, tex, terrainLods);
+	terrain.build(map, tex);
 
 	camRotX = 55.0f;
 	camRotY = 20.0f;
@@ -927,6 +1033,12 @@ static void handleAction(int action)
 	case ACT_PICKER_CLOSE:
 		picker = PICK_NONE;
 		break;
+	case ACT_PALETTE_OPEN:
+		paletteVisible = true;
+		break;
+	case ACT_PALETTE_CLOSE:
+		paletteVisible = false;
+		break;
 	default:
 		break;
 	}
@@ -1037,6 +1149,49 @@ static void drawPicker()
 	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 }
 
+static void drawPalette()
+{
+	if (!paletteVisible)
+		return;
+
+	const float swatch = 18.0f;
+	const float gap = 2.0f;
+	const float panelW = kPaletteCols * (swatch + gap) + 12.0f;
+	const float panelH = kPaletteRows * (swatch + gap) + 48.0f;
+	const float x0 = 10.0f;
+	const float y1 = (float)Main->height - 10.0f;
+	const float y0 = y1 - panelH;
+
+	ui.begin();
+	addPanel(x0, y0, x0 + panelW, y1);
+
+	for (int i = 0; i < kPaletteCols * kPaletteRows; ++i)
+	{
+		int row = i / kPaletteCols;
+		int col = i % kPaletteCols;
+		float x = x0 + 6.0f + (float)col * (swatch + gap);
+		float y = y1 - 30.0f - (float)(row + 1) * (swatch + gap);
+
+		unsigned char rgb[3];
+		paletteColour(i, rgb);
+		ui.quad(x, y, x + swatch, y + swatch, rgb[0] / 255.0f, rgb[1] / 255.0f, rgb[2] / 255.0f,
+		        1.0f);
+
+		if (rgb[0] == fixedColour[0] && rgb[1] == fixedColour[1] && rgb[2] == fixedColour[2])
+			ui.outline(x - 1, y - 1, x + swatch + 1, y + swatch + 1, 2.0f, 1.0f, 1.0f, 1.0f, 1.0f);
+
+		ui.addHit(ACT_PALETTE_BASE + i, x, y, x + swatch, y + swatch);
+	}
+
+	addButton(x0 + panelW - 46.0f, y0 + 6.0f, 40.0f, 20.0f, "Close", false, ACT_PALETTE_CLOSE);
+
+	ui.flush(screenMatrix(), 0);
+
+	ui.begin();
+	ui.text(fontLarge, "Palette", x0 + 8, y1 - 16, 1.0f, 1.0f, 1.0f, 1.0f);
+	ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
+}
+
 // Draws every button registered this frame (the bar and the pickers), so the
 // buttons are always painted above the panels that own them.
 static void drawButtons()
@@ -1106,6 +1261,12 @@ static void drawBottomBar()
 	addButton(472, barH - 30, 22, 20, "-", false, ACT_VALUE_DOWN);
 	addButton(498, barH - 30, 22, 20, "+", false, ACT_VALUE_UP);
 	addButton(524, barH - 30, 40, 20, "Pick", false, ACT_VALUE_PICK);
+
+	// Current colour and the palette button.
+	ui.quad(632, barH - 30, 668, barH - 10, fixedColour[0] / 255.0f, fixedColour[1] / 255.0f,
+	        fixedColour[2] / 255.0f, 1.0f);
+	ui.outline(632, barH - 30, 668, barH - 10, 1.0f, 0.45f, 0.50f, 0.55f, 1.0f);
+	addButton(672, barH - 30, 44, 20, "Pal", paletteVisible, ACT_PALETTE_OPEN);
 
 	// Colour sliders.
 	for (int i = 0; i < 3; ++i)
@@ -1247,6 +1408,75 @@ static void drawHelpPanel()
 	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 }
 
+// One point of a brush outline at the given scale, with a in [0, 1) going all
+// the way around the shape.
+static void brushOutlinePoint(int shape, double cx, double cz, double r, double scale, double a,
+                              double &outX, double &outZ)
+{
+	const double pi = 3.14159265358979323846;
+
+	if (shape == BRUSH_CIRCLE)
+	{
+		double angle = a * 2.0 * pi;
+		outX = cx + sin(angle) * r * scale;
+		outZ = cz + cos(angle) * r * scale;
+	} else if (shape == BRUSH_SQUARE)
+	{
+		double half = r * scale;
+		double t = a * 4.0;
+		int side = (int)t;
+		double f = t - (double)side;
+		switch (side)
+		{
+		case 0:
+			outX = cx - half + 2.0 * half * f;
+			outZ = cz - half;
+			break;
+		case 1:
+			outX = cx + half;
+			outZ = cz - half + 2.0 * half * f;
+			break;
+		case 2:
+			outX = cx + half - 2.0 * half * f;
+			outZ = cz + half;
+			break;
+		default:
+			outX = cx - half;
+			outZ = cz + half - 2.0 * half * f;
+			break;
+		}
+	} else
+	{
+		// Right triangle with the right angle on the cursor.
+		double r2 = r * scale;
+		double t = a * 3.0;
+		int side = (int)t;
+		double f = t - (double)side;
+		double px, pz, qx, qz;
+		if (side == 0)
+		{
+			px = cx;
+			pz = cz;
+			qx = cx - r2;
+			qz = cz;
+		} else if (side == 1)
+		{
+			px = cx - r2;
+			pz = cz;
+			qx = cx;
+			qz = cz - r2;
+		} else
+		{
+			px = cx;
+			pz = cz - r2;
+			qx = cx;
+			qz = cz;
+		}
+		outX = px + (qx - px) * f;
+		outZ = pz + (qz - pz) * f;
+	}
+}
+
 static void drawBrushOutline()
 {
 	if (brushsize <= 0.0f)
@@ -1263,41 +1493,49 @@ static void drawBrushOutline()
 	{
 		if (rectActive)
 		{
-			float ay = GetH(map, (int)(rectAx * 64.0), (int)(rectAz * 64.0)) + 0.1f;
-			float by = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0)) + 0.1f;
-			ui.linePoint((float)rectAx, ay, (float)rectAz, cr, cg, 0.0f, 1.0f);
-			ui.linePoint((float)mx, ay, (float)rectAz, cr, cg, 0.0f, 1.0f);
-			ui.linePoint((float)mx, by, (float)mz, cr, cg, 0.0f, 1.0f);
-			ui.linePoint((float)rectAx, by, (float)mz, cr, cg, 0.0f, 1.0f);
+			float ay = GetH(map, (int)(rectAx * 64.0), (int)(rectAz * 64.0)) + 0.15f;
+			float by = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0)) + 0.15f;
+			ui.lineSegment((float)rectAx, ay, (float)rectAz, (float)mx, ay, (float)rectAz, cr, cg,
+			               0.0f, 1.0f);
+			ui.lineSegment((float)mx, ay, (float)rectAz, (float)mx, by, (float)mz, cr, cg, 0.0f,
+			               1.0f);
+			ui.lineSegment((float)mx, by, (float)mz, (float)rectAx, by, (float)mz, cr, cg, 0.0f,
+			               1.0f);
+			ui.lineSegment((float)rectAx, by, (float)mz, (float)rectAx, ay, (float)rectAz, cr, cg,
+			               0.0f, 1.0f);
 		}
-	} else if (brushShape == BRUSH_SQUARE)
-	{
-		float h0 = GetH(map, (int)((mx - sr) * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
-		float h1 = GetH(map, (int)((mx + sr) * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
-		float h2 = GetH(map, (int)((mx + sr) * 64.0), (int)((mz + sr) * 64.0)) + 0.1f;
-		float h3 = GetH(map, (int)((mx - sr) * 64.0), (int)((mz + sr) * 64.0)) + 0.1f;
-		ui.linePoint((float)(mx - sr), h0, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
-		ui.linePoint((float)(mx + sr), h1, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
-		ui.linePoint((float)(mx + sr), h2, (float)(mz + sr), cr, cg, 0.0f, 1.0f);
-		ui.linePoint((float)(mx - sr), h3, (float)(mz + sr), cr, cg, 0.0f, 1.0f);
-	} else if (brushShape == BRUSH_TRIANGLE)
-	{
-		float h0 = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0)) + 0.1f;
-		float h1 = GetH(map, (int)((mx - sr) * 64.0), (int)(mz * 64.0)) + 0.1f;
-		float h2 = GetH(map, (int)(mx * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
-		ui.linePoint((float)mx, h0, (float)mz, cr, cg, 0.0f, 1.0f);
-		ui.linePoint((float)(mx - sr), h1, (float)mz, cr, cg, 0.0f, 1.0f);
-		ui.linePoint((float)mx, h2, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
 	} else
 	{
-		for (int k = 0; k < 360; k += 360 / 64)
+		// The outer ring plus one ring for every strength level of the falloff,
+		// so the soft edge of the brush can be seen on the ground.
+		static const double strengths[] = {1.0, 0.75, 0.5, 0.25};
+		const int segments = 64;
+		const int rings = (int)(sizeof(strengths) / sizeof(strengths[0]));
+
+		for (int ring = 0; ring < rings; ++ring)
 		{
-			float angle = (float)k / 360.0f * 2.0f * 3.14159265358979323846f;
-			float dx = sin(angle) * sr;
-			float dz = cos(angle) * sr;
-			float height =
-			    GetH(map, (int)(mx * 64.0 + dx * 64.0), (int)(mz * 64.0 + dz * 64.0)) + 0.1f;
-			ui.linePoint((float)mx + dx, height, (float)mz + dz, cr, cg, 0.0f, 1.0f);
+			double strength = strengths[ring];
+			double scale = 1.0;
+			if (ring > 0)
+				scale = 1.0 - pow(strength, 1.0 / (double)falloff);
+
+			float alpha = ring == 0 ? 1.0f : (0.6f - 0.12f * (float)ring);
+
+			double lx = 0.0, lz = 0.0;
+			float lh = 0.0f;
+			for (int i = 0; i <= segments; ++i)
+			{
+				double a = (double)i / (double)segments;
+				double px, pz;
+				brushOutlinePoint(brushShape, mx, mz, sr, scale, a, px, pz);
+				float h = GetH(map, (int)(px * 64.0), (int)(pz * 64.0)) + 0.15f;
+				if (i > 0)
+					ui.lineSegment((float)lx, lh, (float)lz, (float)px, h, (float)pz, cr, cg, 0.0f,
+					               alpha);
+				lx = px;
+				lz = pz;
+				lh = h;
+			}
 		}
 	}
 
@@ -1495,16 +1733,10 @@ int main(int argc, char **argv)
 		if (Main->getkey(SDL_SCANCODE_EQUALS))
 			falloff = std::min(4.0f, falloff + 0.2f);
 
-		if (Main->getkeydown(SDL_SCANCODE_T) && detail > 4)
-		{
+		if (Main->getkeydown(SDL_SCANCODE_T) && detail > 2)
 			detail -= 1;
-			refreshTerrainLods(true);
-		}
 		if (Main->getkeydown(SDL_SCANCODE_Y) && detail < 10)
-		{
 			detail += 1;
-			refreshTerrainLods(true);
-		}
 
 		int newMode = mode;
 		if (Main->getkeydown(SDL_SCANCODE_0))
@@ -1566,23 +1798,28 @@ int main(int argc, char **argv)
 
 		if (mousePressed && hit >= 0)
 		{
-			if (hit >= ACT_PICKER_BASE)
+			if (hit >= ACT_PALETTE_BASE)
+			{
+				int index = hit - ACT_PALETTE_BASE;
+				if (index >= 0 && index < kPaletteCols * kPaletteRows)
+					paletteColour(index, fixedColour);
+			} else if (hit >= ACT_PICKER_BASE)
 			{
 				handlePickerClick(hit - ACT_PICKER_BASE);
+			} else if (hit >= ACT_COLOUR_BASE)
+			{
+				int channel = hit - ACT_COLOUR_BASE;
+				float barH = (float)Main->barHeight;
+				float bottom = barH - 58.0f;
+				float top = barH - 46.0f;
+				float t = (float)(Main->height - Main->mousey) - bottom;
+				float v = std::max(0.0f, std::min(1.0f, t / (top - bottom)));
+				fixedColour[channel] = (unsigned char)(v * 255.0f);
 			} else if (hit >= ACT_TEXTURE_BASE)
 			{
 				browser.select(hit - ACT_TEXTURE_BASE);
 				if (!browser.empty())
 					printf("texture: %s\n", browser.current()->name.c_str());
-			} else if (hit >= ACT_COLOUR_BASE)
-			{
-				int channel = hit - ACT_COLOUR_BASE;
-				float barH = (float)Main->barHeight;
-				float bottom = barH - 60.0f;
-				float top = barH - 32.0f;
-				float t = (float)(Main->height - Main->mousey) - bottom;
-				float v = std::max(0.0f, std::min(1.0f, t / (top - bottom)));
-				fixedColour[channel] = (unsigned char)(v * 255.0f);
 			} else
 			{
 				handleAction(hit);
@@ -1609,12 +1846,16 @@ int main(int argc, char **argv)
 			}
 		} else if (paintingMouse)
 		{
-			if (!painting)
-			{
-				painting = true;
-				commitStroke();
-			}
-			applyBrush();
+			paintStrokeSegment();
+
+			// Push the changes to the GPU right away so the stroke is visible
+			// while it is being drawn instead of only when the button is
+			// released.
+			tex->uploadPaintLayers();
+			if (mode == MODE_METAL)
+				rebuildMetalTexture();
+			if (mode == MODE_HEIGHT && debugView == 2)
+				rebuildHeightTexture();
 		} else if (painting)
 		{
 			painting = false;
@@ -1622,7 +1863,7 @@ int main(int argc, char **argv)
 		}
 
 		// --- draw ---
-		refreshTerrainLods(false);
+		refreshTerrainLods();
 		terrain.flushDirty();
 		Main->camrx = camRotX;
 		Main->camry = camRotY;
@@ -1679,6 +1920,7 @@ int main(int argc, char **argv)
 		drawBottomBar();
 		drawHelpPanel();
 		drawPicker();
+		drawPalette();
 		drawButtons();
 		glEnable(GL_DEPTH_TEST);
 
