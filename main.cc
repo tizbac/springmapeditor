@@ -167,6 +167,10 @@ static int dialogField = 0; // 0 = the path field, 1 = the size field
 static int confirmAction = 0;
 static std::string pendingTexturePath;
 static std::string dialogSizeText = "1024x1024";
+// New map size, in units of 512 map squares (10 = 5120 squares).
+static int newMapUnitsX = 2;
+static int newMapUnitsY = 2;
+static bool sliderIsNewMap = false;
 static const int kMenuHeight = 24;
 
 static const char *modeNames[] = {"height", "metal", "texture", "colour", "startpos"};
@@ -1687,7 +1691,8 @@ static void handleAction(int action)
 		dialogTitle = "New map";
 		dialogMessage = "Path for the new .smf and its size in map squares";
 		fieldText = mapDir.empty() ? "newmap.smf" : joinPath(mapDir, "newmap.smf");
-		dialogSizeText = "1024x1024";
+		newMapUnitsX = 2;
+		newMapUnitsY = 2;
 		dialogField = 0;
 		dialogTextActive = true;
 		break;
@@ -1992,6 +1997,16 @@ static void updateSliderFromMouse(int i)
 	float t = ((float)Main->mousex - x0) / (x1 - x0);
 	t = std::max(0.0f, std::min(1.0f, t));
 
+	if (sliderIsNewMap)
+	{
+		int v = 1 + (int)(t * 39.0f + 0.5f);
+		if (i == 0)
+			newMapUnitsX = v;
+		else
+			newMapUnitsY = v;
+		return;
+	}
+
 	if (i == 0)
 	{
 		mapMinZ = -2000.0f + t * 4000.0f;
@@ -2028,6 +2043,8 @@ static void drawMapSettings()
 	const float y0 = y1 - panelH;
 	const float controlX = x0 + 128.0f;
 	const float sliderW = 170.0f;
+
+	sliderIsNewMap = false;
 
 	ui.begin();
 	addPanel(x0, y0, x0 + panelW, y1);
@@ -2221,7 +2238,7 @@ static void drawDialog()
 
 	const bool small = dialog != DLG_PROGRESS;
 	const float w = small ? 420.0f : 460.0f;
-	const float h = small ? 170.0f : 130.0f;
+	const float h = dialog == DLG_NEW ? 250.0f : (small ? 170.0f : 130.0f);
 	const float x0 = ((float)Main->width - w) * 0.5f;
 	const float y1 = (float)Main->viewTop() - 60.0f;
 	const float y0 = y1 - h;
@@ -2297,9 +2314,22 @@ static void drawDialog()
 		ui.addHit(ACT_DIALOG_BASE + 10, fx0, fy0, fx1, fy1);
 		if (dialog == DLG_NEW)
 		{
-			ui.quad(fx0, fy0 - 26, fx0 + 200, fy0 - 8, 0.22f, 0.24f, 0.28f, 1.0f);
-			ui.outline(fx0, fy0 - 26, fx0 + 200, fy0 - 8, 1.0f, 0.45f, 0.5f, 0.55f, 1.0f);
-			ui.addHit(ACT_DIALOG_BASE + 11, fx0, fy0 - 26, fx0 + 200, fy0 - 8);
+			// Width and height, in units of 512 map squares.
+			sliderIsNewMap = true;
+			for (int i = 0; i < 2; ++i)
+			{
+				float sy = fy0 - 26.0f - (float)i * 44.0f;
+				float t = (float)(i == 0 ? newMapUnitsX : newMapUnitsY) / 40.0f;
+				t = std::max(0.0f, std::min(1.0f, t));
+				ui.quad(fx0, sy, fx0 + 260, sy + 16, 0.18f, 0.20f, 0.24f, 1.0f);
+				ui.quad(fx0, sy, fx0 + 260.0f * t, sy + 16, 0.35f, 0.55f, 0.75f, 1.0f);
+				ui.outline(fx0, sy, fx0 + 260, sy + 16, 1.0f, 0.4f, 0.45f, 0.5f, 1.0f);
+				ui.addHit(ACT_DIALOG_BASE + 20 + i, fx0, sy, fx0 + 260, sy + 16);
+				sliderRect[i][0] = fx0;
+				sliderRect[i][1] = sy;
+				sliderRect[i][2] = fx0 + 260;
+				sliderRect[i][3] = sy + 16;
+			}
 		}
 		ui.flush(screenMatrix(), 0);
 
@@ -2309,9 +2339,13 @@ static void drawDialog()
 		        1.0f, 1.0f);
 		if (dialog == DLG_NEW)
 		{
-			ui.text(fontSmall, "size", fx0 + 206, fy0 + 6, 0.8f, 0.85f, 0.9f, 1.0f);
-			ui.text(fontSmall, fitText(dialogSizeText, 190).c_str(), x0 + 12, fy0 - 21, 1.0f, 1.0f,
-			        1.0f, 1.0f);
+			char sizeText[64];
+			snprintf(sizeText, sizeof(sizeText), "Width  %d units (%d squares)", newMapUnitsX,
+			         newMapUnitsX * 512);
+			ui.text(fontSmall, sizeText, fx0, fy0 - 40, 0.9f, 0.92f, 0.95f, 1.0f);
+			snprintf(sizeText, sizeof(sizeText), "Height %d units (%d squares)", newMapUnitsY,
+			         newMapUnitsY * 512);
+			ui.text(fontSmall, sizeText, fx0, fy0 - 84, 0.9f, 0.92f, 0.95f, 1.0f);
 		}
 		ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 	}
@@ -2368,15 +2402,12 @@ static std::string smdPathFor(const std::string &smfPath)
 
 static void createNewMap(const std::string &path, const std::string &sizeText)
 {
-	int width = 1024, height = 1024;
-	int w = 0, h = 0;
-	if (sscanf(sizeText.c_str(), "%d%*[xX]%d", &w, &h) >= 1 && w > 0)
-	{
-		width = w;
-		height = h > 0 ? h : w;
-	}
-	width = std::max(128, std::min(8192, (width / 128) * 128));
-	height = std::max(128, std::min(8192, (height / 128) * 128));
+	(void)sizeText;
+	// One unit is 512 map squares, so 10x10 is 5120x5120.
+	int width = std::max(1, newMapUnitsX) * 512;
+	int height = std::max(1, newMapUnitsY) * 512;
+	width = std::max(128, std::min(16384, (width / 128) * 128));
+	height = std::max(128, std::min(16384, (height / 128) * 128));
 
 	dialog = DLG_PROGRESS;
 	progressValue = 0.2f;
@@ -3085,18 +3116,17 @@ static void drawBottomBar()
 
 	// The bar has two strips: the texture thumbnails along the bottom and the
 	// control panels above them, both stretched to the full window width.
-	const float thumbY = 5.0f;
-	const int maxThumb = 0;
-	const float thumbsBottom = 5.0f + 8.0f;
 
 	const float panelsTop = barH - 4.0f;
-	const float panelsBottom = thumbsBottom;
+	const float panelsBottom = 4.0f;
 	const float panelH = std::max(40.0f, panelsTop - panelsBottom);
-	const float buttonH = std::max(20.0f, std::min(30.0f, panelH * 0.34f));
-	const float contentH = buttonH + 10.0f + 12.0f + 14.0f;
-	const float buttonY = panelsBottom + (panelH + contentH) * 0.5f - contentH + 6.0f;
-	const float titleY = buttonY - 10.0f;
-	const float infoY = titleY - 14.0f;
+	const float buttonH = std::max(20.0f, std::min(32.0f, panelH * 0.36f));
+	const float textBlock = 26.0f;
+	const float contentH = buttonH + textBlock;
+	const float contentBottom = panelsBottom + (panelH - contentH) * 0.5f;
+	const float buttonY = contentBottom + textBlock;
+	const float titleY = contentBottom + 14.0f;
+	const float infoY = contentBottom + 2.0f;
 
 	// Widths: every panel gets at least the room its controls need, the rest of
 	// the window is shared between them.
@@ -3171,29 +3201,24 @@ static void drawBottomBar()
 	addButton(px + 106, buttonY, 40, buttonH, brushSubtract ? "-" : "+", brushSubtract,
 	          ACT_BRUSH_SIGN);
 
-	// Colour swatch, palette button and the three channel sliders.
+	// Colour swatch, the three channel sliders and the palette button, all in the
+	// button row.
 	px = panelX[4] + 6.0f;
-	ui.quad(px, buttonY, px + 30, buttonY + buttonH, fixedColour[0] / 255.0f,
+	ui.quad(px, buttonY, px + 26, buttonY + buttonH, fixedColour[0] / 255.0f,
 	        fixedColour[1] / 255.0f, fixedColour[2] / 255.0f, 1.0f);
-	ui.outline(px, buttonY, px + 30, buttonY + buttonH, 1.0f, 0.45f, 0.50f, 0.55f, 1.0f);
-	addButton(px + 34, buttonY, 40, buttonH, "Pal", paletteVisible, ACT_PALETTE_OPEN);
+	ui.outline(px, buttonY, px + 26, buttonY + buttonH, 1.0f, 0.45f, 0.50f, 0.55f, 1.0f);
 
+	for (int i = 0; i < 3; ++i)
 	{
-		float sliderTop = buttonY - 6.0f;
-		float sliderBottom = panelsBottom + 4.0f;
-		float sliderH = std::max(10.0f, sliderTop - sliderBottom);
-		for (int i = 0; i < 3; ++i)
-		{
-			float sx = px + (float)i * 36.0f;
-			if (sx + 30.0f > panelX[4] + panelW[4] - 4.0f)
-				break;
-			float v = fixedColour[i] / 255.0f;
-			ui.quad(sx, sliderBottom, sx + 30, sliderBottom + sliderH, 0.18f, 0.20f, 0.24f, 1.0f);
-			ui.quad(sx, sliderBottom, sx + 30, sliderBottom + sliderH * v, i == 0 ? 0.95f : 0.25f,
-			        i == 1 ? 0.95f : 0.25f, i == 2 ? 0.95f : 0.25f, 1.0f);
-			ui.addHit(ACT_COLOUR_BASE + i, sx, sliderBottom, sx + 30, sliderBottom + sliderH);
-		}
+		float sx = px + 30.0f + (float)i * 20.0f;
+		float v = fixedColour[i] / 255.0f;
+		ui.quad(sx, buttonY, sx + 18, buttonY + buttonH, 0.18f, 0.20f, 0.24f, 1.0f);
+		ui.quad(sx, buttonY, sx + 18, buttonY + buttonH * v, i == 0 ? 0.95f : 0.25f,
+		        i == 1 ? 0.95f : 0.25f, i == 2 ? 0.95f : 0.25f, 1.0f);
+		ui.addHit(ACT_COLOUR_BASE + i, sx, buttonY, sx + 18, buttonY + buttonH);
 	}
+
+	addButton(px + 96.0f, buttonY, 40, buttonH, "Pal", paletteVisible, ACT_PALETTE_OPEN);
 
 	// Actions, right aligned.
 	px = panelX[5] + panelW[5] - 6.0f;
@@ -3559,7 +3584,8 @@ int main(int argc, char **argv)
 	{
 		glViewport(0, 0, Main->width, Main->height);
 		Main->clearscreen(0.22f, 0.23f, 0.26f, 1.0f);
-		Main->setBarHeight(Main->height / 5);
+		// The bar is a fixed height; only very small windows shrink it.
+		Main->setBarHeight(std::min(150, Main->height / 3));
 		Main->setMenuHeight(kMenuHeight);
 		if (Main->closeRequested)
 		{
@@ -3707,7 +3733,7 @@ int main(int argc, char **argv)
 		Main->escapePressed = false;
 
 		// The shortcuts are disabled while a map info field has the keyboard.
-		if (activeField < 0 && !dialogTextActive)
+		if (activeField < 0 && !dialogTextActive && dialog == DLG_NONE)
 		{
 			// --- brush keys ---
 			float rate = 5.0f / std::max(1.0, (double)Main->getfps());
@@ -3873,11 +3899,11 @@ int main(int argc, char **argv)
 					dialogTextActive = true;
 					dialogField = 0;
 					fieldText.clear();
-				} else if (b == 11)
+				} else if (b == 20 || b == 21)
 				{
-					dialogTextActive = true;
-					dialogField = 1;
-					dialogSizeText.clear();
+					sliderIsNewMap = true;
+					activeSlider = b - 20;
+					updateSliderFromMouse(activeSlider);
 				} else
 				{
 					dialog = DLG_NONE;
