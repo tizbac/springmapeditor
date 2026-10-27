@@ -93,6 +93,7 @@ enum Action {
 	ACT_IMPORT_MAP,
 	ACT_EXPORT_MAP,
 	ACT_IMPORT_TEXTURE,
+	ACT_APPLY_TEXTURE,
 	ACT_EDIT_UNDO,
 	ACT_EDIT_REDO,
 	ACT_MAP_SETTINGS,
@@ -151,6 +152,7 @@ static bool quitAfterSave = false;
 static bool dialogTextActive = false;
 static int dialogField = 0; // 0 = the path field, 1 = the size field
 static int confirmAction = 0;
+static std::string pendingTexturePath;
 static std::string dialogSizeText = "1024x1024";
 static const int kMenuHeight = 24;
 
@@ -1595,7 +1597,7 @@ static void handleAction(int action)
 	}
 }
 
-static void applyMapTexture(const std::string &path)
+static void applyMapTexture(const std::string &path, bool skipAspectCheck = false)
 {
 	if (!tex)
 		return;
@@ -1608,6 +1610,26 @@ static void applyMapTexture(const std::string &path)
 		dialogTitle = "Import map texture";
 		dialogMessage = "Could not read " + fileName(path);
 		return;
+	}
+
+	// The image is stretched over the whole map, so warn when its aspect ratio
+	// does not match the map's (that stretches the texture noticeably).
+	if (!skipAspectCheck && map && gs->mapx > 0 && gs->mapy > 0)
+	{
+		float imageAspect = (float)w / (float)h;
+		float mapAspect = (float)gs->mapx / (float)gs->mapy;
+		if (fabsf(imageAspect - mapAspect) > mapAspect * 0.01f)
+		{
+			char text[384];
+			snprintf(text, sizeof(text), "Image %dx%d, map %dx%d: aspect differs, stretch it?", w,
+			         h, gs->mapx, gs->mapy);
+			pendingTexturePath = path;
+			confirmAction = ACT_APPLY_TEXTURE;
+			dialog = DLG_CONFIRM;
+			dialogTitle = "Import map texture";
+			dialogMessage = text;
+			return;
+		}
 	}
 
 	if (!tex->setColormap(rgb.data(), w, h))
@@ -2052,9 +2074,12 @@ static void drawDialog()
 
 	ui.begin();
 	ui.text(fontLarge, dialogTitle.c_str(), x0 + 12, y1 - 24, 1.0f, 1.0f, 1.0f, 1.0f);
+	ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
+
+	ui.begin();
 	ui.text(fontSmall, fitText(dialogMessage, w - 24).c_str(), x0 + 12, y1 - 44, 0.8f, 0.85f, 0.9f,
 	        1.0f);
-	ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
+	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 
 	if (dialog == DLG_PROGRESS)
 	{
