@@ -188,6 +188,22 @@ bool FileDialog::handleClick(int action)
 
 	if (isDir)
 	{
+		// In project mode a folder that holds a project is selected instead of
+		// being entered, so clicking a project opens it.
+		if (m_mode == Mode::Project)
+		{
+			FILE *probe = fopen(joinPath(full, "map.smf").c_str(), "rb");
+			if (probe)
+			{
+				fclose(probe);
+				Mode mode = m_mode;
+				close();
+				if (m_select)
+					m_select(mode, full);
+				return true;
+			}
+		}
+
 		m_dir = full;
 		m_offset = 0;
 		refresh();
