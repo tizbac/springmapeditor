@@ -18,7 +18,7 @@ const int kMinLod = 3;  // one quad per map square
 const int kMaxLod = 10; // one quad per big square
 // How large a quad should be on screen, in pixels. Used to pick the level of
 // detail of each square.
-const float kTargetQuadPixels = 2.0f;
+const float kTargetQuadPixels = 8.0f;
 // Squares rebuilt per updateLods() call, so a big zoom change does not stall.
 const int kRebuildsPerCall = 12;
 // One world unit is 64 map squares, and a map square is 8 elmos, so heights
