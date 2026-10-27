@@ -173,6 +173,19 @@ static void markTerrainDirty(int squareX, int squareY)
 	if (bx < 0 || by < 0 || bx >= bigSquaresX() || by >= bigSquaresY())
 		return;
 	terrain.markDirty(bx, by);
+
+	// Vertices on a square border sample heights from the neighbouring square,
+	// so refresh those too when the edit is close to an edge.
+	int px = squareX - bx * 128;
+	int py = squareY - by * 128;
+	if (px < 2)
+		terrain.markDirty(bx - 1, by);
+	if (px > 125)
+		terrain.markDirty(bx + 1, by);
+	if (py < 2)
+		terrain.markDirty(bx, by - 1);
+	if (py > 125)
+		terrain.markDirty(bx, by + 1);
 }
 
 static void rebuildMetalTexture()
@@ -1394,6 +1407,31 @@ int main(int argc, char **argv)
 		{
 			camRotY += (float)Main->mouserelx * 0.4f;
 			camRotX += (float)Main->mouserely * 0.4f;
+		}
+
+		// Middle drag pans the map: keep the point that was grabbed under the
+		// cursor by moving the pivot by the same world space amount.
+		static bool panning = false;
+		static float grabbedX = 0.0f, grabbedZ = 0.0f;
+		if (Main->mousecenter)
+		{
+			float gx, gz;
+			if (Main->groundPoint(Main->mousex, Main->mousey, &gx, &gz))
+			{
+				if (!panning)
+				{
+					panning = true;
+					grabbedX = gx;
+					grabbedZ = gz;
+				} else
+				{
+					pivx += grabbedX - gx;
+					pivz += grabbedZ - gz;
+				}
+			}
+		} else
+		{
+			panning = false;
 		}
 
 		if (Main->getwup())

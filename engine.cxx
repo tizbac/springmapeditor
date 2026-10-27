@@ -3,6 +3,7 @@
  */
 #include "engine.h"
 
+#include <cmath>
 #include <cstdio>
 
 bool engine::Init3d(int width, int height, int bpp, bool fullscreen)
@@ -391,6 +392,33 @@ bool engine::pickGround(int px, int py, double *ox, double *oy, double *oz) cons
 	*ox = p0x + (p1x - p0x) * t;
 	*oy = 0.0;
 	*oz = p0z + (p1z - p0z) * t;
+	return true;
+}
+
+bool engine::groundPoint(int px, int py, float *x, float *z) const
+{
+	int vpW = this->width;
+	int vpH = this->height - this->barHeight;
+	if (vpH < 1 || px < 0 || px >= vpW || py < 0 || py >= vpH)
+		return false;
+
+	float ndcX = 2.0f * (float)px / (float)vpW - 1.0f;
+	float ndcY = 2.0f * (float)(vpH - 1 - py) / (float)vpH - 1.0f;
+
+	float p0x, p0y, p0z, p1x, p1y, p1z;
+	invVP.transformPoint(ndcX, ndcY, -1.0f, p0x, p0y, p0z);
+	invVP.transformPoint(ndcX, ndcY, 1.0f, p1x, p1y, p1z);
+
+	float dirY = p1y - p0y;
+	if (std::fabs(dirY) < 1e-9f)
+		return false;
+
+	float t = -p0y / dirY;
+	if (t < 0.0f)
+		return false;
+
+	*x = p0x + (p1x - p0x) * t;
+	*z = p0z + (p1z - p0z) * t;
 	return true;
 }
 

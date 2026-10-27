@@ -207,6 +207,11 @@ void Terrain::flushDirty()
 
 	std::vector<float> square;
 
+	// The array buffer binding is not part of the vertex array object, so bind
+	// it explicitly: without this the upload silently targets another buffer and
+	// height edits never reach the screen.
+	glBindBuffer(GL_ARRAY_BUFFER, vbo);
+
 	for (size_t i = 0; i < squares.size(); ++i)
 	{
 		if (!dirty[i])

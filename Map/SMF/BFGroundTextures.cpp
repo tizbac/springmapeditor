@@ -507,79 +507,59 @@ int tileoffset[] = {0, 512, 640, 672};
 
 void CBFGroundTextures::LoadSquare(int x, int y, int level)
 {
-	int size = 1024 >> level;
+	(void)level;
 
-	GLubyte *buf = NULL;
-	bool usedPBO = false;
-	if (usePBO)
-	{
-		if (currentPBO > 9)
-			currentPBO = 0;
-		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboIDs[currentPBO++]);
-		glBufferData(GL_PIXEL_UNPACK_BUFFER, size * size / 2, 0, GL_STREAM_DRAW);
-
-		// map the buffer object into client's memory
-		buf = (GLubyte *)glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
-		usedPBO = true;
-	}
-	if (buf == NULL)
-	{
-		buf = new GLubyte[size * size / 2];
-		usedPBO = false;
-	}
-
+	// One texture per big square with the whole mip chain from the tile file:
+	// level 0 is 1024x1024 and each following level halves it. The chain is what
+	// makes the ground texture filter by screen size (through the derivatives in
+	// the shader) instead of by distance to the camera.
 	GroundSquare *square = &squares[y * numBigTexX + x];
-	square->texLevel = level;
-
-	int numblocks = 8 / (1 << level);
-
-	for (int y1 = 0; y1 < 32; y1++)
-	{
-		for (int x1 = 0; x1 < 32; x1++)
-		{
-			const unsigned char *tile =
-			    &tiles[(size_t)tileMap[(x1 + x * 32) + (y1 + y * 32) * tileMapXSize] *
-			               SMALL_TILE_SIZE +
-			           tileoffset[level]];
-			for (int yt = 0; yt < numblocks; yt++)
-			{
-				for (int xt = 0; xt < numblocks; xt++)
-				{
-					GLint *sbuf = (GLint *)&tile[(xt + yt * numblocks) * 8];
-					GLint *dbuf = (GLint *)&buf[(x1 * numblocks + xt +
-					                             (y1 * numblocks + yt) * (numblocks * 32)) *
-					                            8];
-					dbuf[0] = sbuf[0];
-					dbuf[1] = sbuf[1];
-				}
-			}
-		}
-	}
 
 	glGenTextures(1, &square->texture);
 	glBindTexture(GL_TEXTURE_2D, square->texture);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 1);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	if (GLEW_EXT_texture_edge_clamp)
-	{
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-	}
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	// The tile file only carries four levels; without this the texture is
+	// incomplete down to 1x1 and samples as black.
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 3);
 	if (map->anisotropy != 0.0f)
 		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, map->anisotropy);
 
-	if (usedPBO)
+	for (int mip = 0; mip < 4; ++mip)
 	{
-		glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
-		                       size * size / 2, 0);
-		glBufferData(GL_PIXEL_UNPACK_BUFFER, 0, 0, GL_STREAM_DRAW); // free it
-		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-	} else
-	{
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
-		                       size * size / 2, buf);
-		delete[] buf;
+		int size = 1024 >> mip;
+		int numblocks = 8 >> mip;
+
+		std::vector<GLubyte> buf((size_t)size * size / 2, 0);
+
+		for (int y1 = 0; y1 < 32; y1++)
+		{
+			for (int x1 = 0; x1 < 32; x1++)
+			{
+				const unsigned char *tile =
+				    &tiles[(size_t)tileMap[(x1 + x * 32) + (y1 + y * 32) * tileMapXSize] *
+				               SMALL_TILE_SIZE +
+				           tileoffset[mip]];
+				for (int yt = 0; yt < numblocks; yt++)
+				{
+					for (int xt = 0; xt < numblocks; xt++)
+					{
+						GLint *sbuf = (GLint *)&tile[(xt + yt * numblocks) * 8];
+						GLint *dbuf = (GLint *)&buf[(x1 * numblocks + xt +
+						                             (y1 * numblocks + yt) * (numblocks * 32)) *
+						                            8];
+						dbuf[0] = sbuf[0];
+						dbuf[1] = sbuf[1];
+					}
+				}
+			}
+		}
+
+		glCompressedTexImage2D(GL_TEXTURE_2D, mip, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
+		                       size * size / 2, buf.data());
 	}
+
+	square->texLevel = 0;
 }

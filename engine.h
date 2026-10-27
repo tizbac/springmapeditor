@@ -78,6 +78,11 @@ class engine {
 	// ray is intersected with the ground plane y = 0.
 	bool pickGround(int px, int py, double *ox, double *oy, double *oz) const;
 
+	// Where the ray through the pixel (px, py) meets the ground plane y = 0,
+	// without touching the depth buffer. Used to drag the map with the middle
+	// mouse button.
+	bool groundPoint(int px, int py, float *x, float *z) const;
+
 	void display();
 };
 
