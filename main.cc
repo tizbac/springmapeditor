@@ -53,6 +53,18 @@ enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
 enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3 };
 enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2, PICK_PROJECT = 3, PICK_MAPTEX = 4 };
 
+// Modal dialogs.
+enum Dialog {
+	DLG_NONE = 0,
+	DLG_EXIT,
+	DLG_SAVE_AS,
+	DLG_EXPORT,
+	DLG_NEW,
+	DLG_CONFIRM,
+	DLG_MESSAGE,
+	DLG_PROGRESS
+};
+
 enum Action {
 	ACT_NONE = 0,
 	ACT_OPEN_MAP,
@@ -118,7 +130,7 @@ struct MenuItem {
 	int action;
 };
 static const MenuItem fileMenu[] = {
-    {"New project", ACT_NEW_PROJECT},
+    {"New map...", ACT_NEW_PROJECT},
     {"Open project...", ACT_OPEN_PROJECT},
     {"Save project", ACT_SAVE_PROJECT},
     {"Save project as...", ACT_SAVE_PROJECT_AS},
@@ -300,6 +312,9 @@ static void requestQuit();
 static void saveProject(const std::string &dir);
 static void openProject(const std::string &dir);
 static void createNewMap(const std::string &path, const std::string &sizeText);
+static bool loadImageRgb(const std::string &path, std::vector<unsigned char> &rgb, int &outW,
+                         int &outH);
+static std::string fileStem(const std::string &path);
 static std::string extractArchive(const std::string &archivePath, const std::string &dir);
 
 static int picker = PICK_NONE;
