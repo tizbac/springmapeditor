@@ -64,6 +64,11 @@ void shader::createfromfiles(const char * fsfile,const char * vsfile)
 void shader::useshader(void)
 {
 	glUseProgram(this->program);
+#ifdef SHADER_DEBUG
+	int linked = 0;
+	glGetProgramiv(this->program, GL_LINK_STATUS, &linked);
+	printf("shader program=%u isProgram=%d linked=%d error=%d\n", this->program, glIsProgram(this->program), linked, (int)glGetError());
+#endif
 }
 void shader::setuniformfloat(const char *uniname,float value)
 {

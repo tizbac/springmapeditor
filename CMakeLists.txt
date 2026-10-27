@@ -14,14 +14,24 @@ find_package(GLEW REQUIRED)
 find_package(Freetype REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 
+# Image loading for the texture browser. FreeImage is used when available;
+# without it only BMP files can be read (through SDL).
+find_library(FREEIMAGE_LIBRARY freeimage)
+if(FREEIMAGE_LIBRARY)
+    add_definitions(-DHAVE_FREEIMAGE)
+endif()
+
 add_subdirectory(ftgl)
 
 add_executable(editor
+
+    dxt1.cxx
     engine.cxx
     float3.cpp
     light.cxx
     main.cc
     shader.cxx
+    texturebrowser.cxx
     Map/ReadMap.cpp
     Map/SMF/BFGroundTextures.cpp
     Map/SMF/SmfReadMap.cpp
@@ -40,6 +50,10 @@ target_link_libraries(editor PRIVATE
     Freetype::Freetype
     SDL3::SDL3
 )
+
+if(FREEIMAGE_LIBRARY)
+    target_link_libraries(editor PRIVATE ${FREEIMAGE_LIBRARY})
+endif()
 
 # Shaders are loaded relative to the working directory at runtime.
 add_custom_command(TARGET editor POST_BUILD

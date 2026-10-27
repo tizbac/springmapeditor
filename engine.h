@@ -9,6 +9,10 @@ class engine{
 	float camx;
 	float camy;
 	float camz;
+	float pivx;
+	float pivy;
+	float pivz;
+	float camdist;
     float camrx;
 	float camry;
 	bool mouseleft;
@@ -27,6 +31,8 @@ class engine{
 	bool wdown;
 	bool left;
 	bool right;
+	bool ctrl;
+	bool shift;
 	float frustum[6][4];
 	SDL_Event ev;
 	Uint64 cleartime;
@@ -46,7 +52,11 @@ class engine{
 	bool pointinview(float x, float y , float z);
 	void Transform(float x,float y,float z,float rx,float ry,float rz);
 	void SetCameraPos(float x,float y,float z);
+	void SetCamera(float px,float py,float pz,float rx,float ry,float rz,float dist);
+	void Zoom(float amount);
 	void OrthoMode();
+	void OverlayBegin();
+	void OverlayEnd();
 	void NormalMode();
 	void SetCameraRotation(float x,float y,float z);
 	void Make2DPositionInto3DPosition (float x, float y, double *ox, double *oy, double *oz)

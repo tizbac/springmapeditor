@@ -10,6 +10,10 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 	this->width = width;
 	this->fullscreen = fullscreen;
 	this->quit = false;
+	this->pivx = 0;
+	this->pivy = 0;
+	this->pivz = 0;
+	this->camdist = 20.0;
 
 	if (!SDL_Init(SDL_INIT_VIDEO))
 	{
@@ -76,6 +80,8 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 	this->down = false;
 	this->left = false;
 	this->right = false;
+	this->ctrl = false;
+	this->shift = false;
 	this->mouseleft = false;
 	this->mouseright = false;
 	glMatrixMode(GL_MODELVIEW);
@@ -257,6 +263,14 @@ void engine::clearscreen(float r,float g,float b,float a)
                 case SDL_SCANCODE_DOWN:
                     this->down = ev.key.down;
                     break;
+                case SDL_SCANCODE_LCTRL:
+                case SDL_SCANCODE_RCTRL:
+                    this->ctrl = ev.key.down;
+                    break;
+                case SDL_SCANCODE_LSHIFT:
+                case SDL_SCANCODE_RSHIFT:
+                    this->shift = ev.key.down;
+                    break;
                 default:
                     break;
                 }
@@ -344,42 +358,59 @@ void engine::PopTransform()
 }
 void engine::SetCameraPos(float x,float y,float z)
 {
+    SetCamera(x,y,z,this->camrx,this->camry,this->camrz,this->camdist);
+}
 
+// Orbit camera: the world is rotated by (rx,ry,rz) and then pushed `dist`
+// units away from the pivot, so rotating spins the view around the pivot and
+// zooming moves along the view axis.
+void engine::SetCamera(float px,float py,float pz,float rx,float ry,float rz,float dist)
+{
+    this->pivx = px;
+    this->pivy = py;
+    this->pivz = pz;
+    this->camrx = rx;
+    this->camry = ry;
+    this->camrz = rz;
+    if (dist < 0.2f)
+        dist = 0.2f;
+    this->camdist = dist;
 
-    this->camx = x;
-    this->camy = y;
-    this->camz = z;
+    // Eye position, used by the HUD only.
+    float vx = cos(rx) * sin(ry);
+    float vy = -sin(rx);
+    float vz = cos(rx) * cos(ry);
+    this->camx = px + dist * (vx * cos(rz) + vy * sin(rz));
+    this->camy = py + dist * (-vx * sin(rz) + vy * cos(rz));
+    this->camz = pz + dist * vz;
+
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();
-	gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,1000.0f);
+	gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,2000.0f);
+    glTranslatef(0.0,0.0,-dist);
     glRotatef(this->camrx,1.0,0.0,0.0);
     glRotatef(this->camry,0.0,1.0,0.0);
     glRotatef(this->camrz,0.0,0.0,1.0);
-    glTranslatef(this->camx,this->camy,this->camz);
+    glTranslatef(-px,-py,-pz);
     glGetDoublev(GL_PROJECTION_MATRIX, this->proj);
     glMatrixMode(GL_MODELVIEW);
-
-
-
 }
+
+void engine::Zoom(float amount)
+{
+    float dist = camdist * amount;
+    if (dist < 0.2f)
+        dist = 0.2f;
+    if (dist > 500.0f)
+        dist = 500.0f;
+    SetCamera(pivx,pivy,pivz,camrx,camry,camrz,dist);
+}
+
 void engine::SetCameraRotation(float x,float y,float z)
 {
-
-    this->camrx = x;
-    this->camry = y;
-    this->camrz = z;
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-	gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,1000.0f);
-    glRotatef(this->camrx,1.0,0.0,0.0);
-    glRotatef(this->camry,0.0,1.0,0.0);
-    glRotatef(this->camrz,0.0,0.0,1.0);
-    glTranslatef(this->camx,this->camy,this->camz);
-    glGetDoublev(GL_PROJECTION_MATRIX, this->proj);
-    glMatrixMode(GL_MODELVIEW);
-
-
+    SetCamera(pivx,pivy,pivz,x,y,z,camdist);
 }
+
 int engine::GetMouseX()
 {
 	return this->mousex;
@@ -400,15 +431,29 @@ void engine::OrthoMode()
 void engine::NormalMode()
 {
  glEnable(GL_LIGHTING);
-   glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,1000.0f);
-  glRotatef(this->camrx,1.0,0.0,0.0);
-  glRotatef(this->camry,0.0,1.0,0.0);
-  glRotatef(this->camrz,0.0,0.0,1.0);
-  glTranslatef(-this->camx,-this->camy,-this->camz);
-  
-  glGetDoublev(GL_PROJECTION_MATRIX, this->proj);
-  glMatrixMode(GL_MODELVIEW);
-    ExtractFrustum();
+  SetCamera(pivx,pivy,pivz,camrx,camry,camrz,camdist);
+  ExtractFrustum();
 }
+
+// 2D screen space overlay for the HUD and the texture browser.
+void engine::OverlayBegin()
+{
+  glMatrixMode(GL_PROJECTION);
+  glLoadIdentity();
+  gluOrtho2D(0,this->width,0,this->height);
+  glMatrixMode(GL_MODELVIEW);
+  glLoadIdentity();
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_LIGHTING);
+  glEnable(GL_BLEND);
+  glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void engine::OverlayEnd()
+{
+  glEnable(GL_DEPTH_TEST);
+  glEnable(GL_LIGHTING);
+  glDisable(GL_BLEND);
+  SetCamera(pivx,pivy,pivz,camrx,camry,camrz,camdist);
+}
+

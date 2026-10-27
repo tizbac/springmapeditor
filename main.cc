@@ -1,27 +1,15 @@
 /* -*- Mode: C; indent-tabs-mode: t; c-basic-offset: 4; tab-width: 4 -*- */
 /*
- * main.c
+ * main.cc
  * Copyright (C) Tiziano 2008 <tiziano@tizbac.dyndns.org>
  *
- * main.cpp is free software.
+ * main.cc is free software.
  *
  * You may redistribute it and/or modify it under the terms of the
  * GNU General Public License, as published by the Free Software
  * Foundation; either version 2 of the License, or (at your option)
  * any later version.
- *
- * main.cpp is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with main.cpp.  If not, write to:
- * 	The Free Software Foundation, Inc.,
- * 	51 Franklin Street, Fifth Floor
- * 	Boston, MA  02110-1301, USA.
  */
-#define flt(x) ((float)x)
 #include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -32,386 +20,480 @@
 #include <unistd.h>
 #include <string>
 #include <algorithm>
-#include "GlobalStuff.h"
-#include <stdarg.h>
-#include <float.h>
-#include "engine.h"
-
 #include <cmath>
+#include <vector>
+#include <set>
+
+#include <GL/glew.h>
+#include <FTGL/ftgl.h>
+
+#include "GlobalStuff.h"
+#include "engine.h"
 #include "light.h"
 #include "shader.h"
-#include <GL/glew.h>
-#include "Map/SMF/BFGroundTextures.h"
-#include "Map/SMF/SmfReadMap.h"
 #include "Map/ReadMap.h"
-#include <FTGL/ftgl.h>
+#include "Map/SMF/mapfile.h"
+#include "Map/SMF/SmfReadMap.h"
+#include "Map/SMF/BFGroundTextures.h"
+#include "texturebrowser.h"
+#include "undostack.h"
+
+enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
+enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3 };
+
+static const char* modeNames[] = {"height", "metal", "texture", "colour"};
+static const char* shapeNames[] = {"circle", "square", "triangle"};
+
 static engine* Main;
-light l0;
-gst * gs;
-float rxx = 0;
-float mappx;
-float mappy;
-bool lastmr = false;
-float ryy = 93.3;
-float ts = 6.0;
-int mode;
-double mx = 0;
-double my = 0;
-double mz = 0;
-GLuint *metaltexture;
-float rzz = 246.0;
-float pxx = -20.37;
-unsigned char * tmpdata;
-float pyy = 14.39;
-float pzz = 4.32;
-unsigned char  *metalmap ;
-float brushsize = 1.0;
-GLint * landscapecache;
-shader groundshader;
-char * landscapecachestatus;
-class v3{
-    public:
-        float x;
-        float z;
-        float y;
-        v3()
-        {
-            this->x = 0;
-            this->y = 0;
-            this->z = 0;
-        }
-        v3(float x,float y,float z)
-        {
-            this->x = x;
-            this->y = y;
-            this->z = z;
+static light l0;
+gst* gs;
+static shader groundshader;
+static CSmfReadMap* map = NULL;
+static CBFGroundTextures* tex = NULL;
+static TextureBrowser browser;
+static UndoStack undoStack;
+static Stroke currentStroke;
+static std::set<int> strokeSeen;
 
-        }
-        v3 crossproduct(v3 o2)
-        {
-            v3 res;
-            res.x = y*o2.z-z*o2.y;
-            res.y = z*o2.x-x*o2.z;
-            res.z = x*o2.y-y*o2.x;
-            return (res);
+static GLuint emptyTexture = 0;
+static unsigned char* metalmap = NULL;
+static GLuint* metaltexture = NULL;
+static GLint* landscapecache = NULL;
+static char* landscapecachestatus = NULL;
+static unsigned char* tmpdata = NULL;
 
-        }
-        v3 operator+(v3 o2)
-        {
-            v3 res;
-            res.x = x + o2.x;
-            res.y = y + o2.y;
-            res.z = z + o2.z;
-            return (res);
-        }
-        v3 operator-(v3 o2)
-        {
-            v3 res;
-            res.x = x - o2.x;
-            res.y = y - o2.y;
-            res.z = z - o2.z;
-            return (res);
-        }
-        v3 operator*(float m)
-        {
-            v3 res;
-            res.x = x*m;
-            res.y = y*m;
-            res.z = z*m;
-            return (res);
-        }
-        v3 operator*(v3 o2)
-        {
-            v3 res;
-            res.x = x*o2.x;
-            res.y = y*o2.y;
-            res.z = z*o2.z;
-            return (res);
-        }
-        float mag()
-        {
-            return sqrt(x*x+y*y);
-        }
+// camera
+static float camRotX = 0.0f;
+static float camRotY = 93.3f;
+static float camRotZ = 246.0f;
+static float camDist = 20.0f;
+static float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
+static bool orbiting = false;
+
+// brush
+static float brushsize = 1.0f;   // 1.0 = 64 map squares radius
+static float hval = 0.0f;        // height/metal value the brush applies
+static float falloff = 1.0f;     // 1 = hard edge, 3 = very soft
+static int brushShape = BRUSH_CIRCLE;
+static int mode = MODE_HEIGHT;
+static float paintScale = 1.0f;  // map texels per texture texel
+static bool browserVisible = false;
+static bool startWithBrowser = false;
+static unsigned char fixedColour[4] = {200, 180, 120, 255};
+
+static double mx = 0, my = 0, mz = 0;
+static double cval = 0.0;
+static double ts = 6.0;
+
+struct v3 {
+	float x, y, z;
+	v3() : x(0), y(0), z(0) {}
+	v3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+	v3 crossproduct(const v3& o) const
+	{
+		return v3(y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x);
+	}
 };
-float GetH(CSmfReadMap* map,int x, int y)
-{
-  if (x < 0 or y < 0){
-    //printf("GetH(%i,%i) : Invalid coords\n" , x,y);
-    return 0.0;}
-  if (x > gs->mapx or y > gs->mapy){
-    //printf("GetH(%i,%i) : Invalid coords\n" , x,y);
-    return 0.0;
-  }
-  int i = (gs->mapx+1)*(y)+(x);
-  //printf("GetH(%i,%i) = %f\n" , x,y,map->heightmap[(gs->mapx+1)*y+x]);
-  float f = map->heightmap[i];
-  if ( f > 20)
-    f = 0.0;
-  return f;
 
+// ---------------------------------------------------------------- helpers
+
+static int bigSquaresX() { return map->width * 8 / 1024; }
+static int bigSquaresY() { return map->height * 8 / 1024; }
+
+float GetH(CSmfReadMap* m, int x, int y)
+{
+	if (x < 0 || y < 0)
+		return 0.0;
+	if (x > gs->mapx || y > gs->mapy)
+		return 0.0;
+	int i = (gs->mapx + 1) * y + x;
+	float f = m->heightmap[i];
+	if (f > 20)
+		f = 0.0;
+	return f;
 }
-void SetH(CSmfReadMap* map,int x, int y,float value)
+
+static void markBigSquareDirty(int sqX, int sqY)
 {
-  if (x < 0 or y < 0){
-    //printf("GetH(%i,%i) : Invalid coords\n" , x,y);
-    return;}
-  if (x > gs->mapx  or y > gs->mapy){
-    //printf("SetH(%i,%i) : Invalid coords\n" , x,y);
-    return;
-  }
-  landscapecachestatus[(x-1)*8/1024+(y-1)*8/1024*(gs->mapx+1)*8/1024] = 'u';
-  int i = (gs->mapx+1)*(y)+(x);
-  //printf("GetH(%i,%i) = %f\n" , x,y,map->heightmap[(gs->mapx+1)*y+x]);
-  map->heightmap[i] = value;
-
-
-
+	int bx = sqX / 128;
+	int by = sqY / 128;
+	if (bx < 0 || by < 0 || bx >= bigSquaresX() || by >= bigSquaresY())
+		return;
+	landscapecachestatus[by * bigSquaresX() + bx] = 'u';
 }
-float GetM(CSmfReadMap* map,int x_, int y_)
+
+void SetH(CSmfReadMap* m, int x, int y, float value)
 {
-    int x = x_ /2;
- int y = y_/2;
-  if (x < 0 or y < 0){
-    //printf("GetM(%i,%i) : Invalid coords\n" , x,y);
-    return 0.0;}
-  if (x > map->width/2 -1  or y > map->height/2 -1){
-    //printf("GetM(%i,%i) : Invalid coords\n" , x,y);
-    return 0.0;
-  }
-  int i = (map->width/2)*(y)+(x);
-  //printf("GetH(%i,%i) = %f\n" , x,y,map->heightmap[(gs->mapx+1)*y+x]);
-  float f = (int)metalmap[i]/255.0;
- /* if ( f > 0.0)
-        printf("GetM(%i,%i) : Out of range: %f\n" , x,y,f);*/
-  if ( f > 256)
-  {
+	if (x < 0 || y < 0)
+		return;
+	if (x > gs->mapx || y > gs->mapy)
+		return;
 
-
-    f = 0.0;}
-  return f;
-
+	int i = (gs->mapx + 1) * y + x;
+	if (!strokeSeen.count(i)) {
+		strokeSeen.insert(i);
+		currentStroke.type = EDIT_HEIGHT;
+		currentStroke.index.push_back(i);
+		currentStroke.oldValue.push_back(m->heightmap[i]);
+	}
+	m->heightmap[i] = value;
+	markBigSquareDirty(x, y);
 }
-void SetM(CSmfReadMap* map,int x_, int y_,float value)
+
+float GetM(CSmfReadMap* m, int x_, int y_)
 {
- int x = x_ /2;
- int y = y_ /2;
-  if (x < 0 or y < 0){
-    //printf("GetH(%i,%i) : Invalid coords\n" , x,y);
-    return;}
-  if (x > map->width/2 -1 or y > map->height/2 -1){
-    //printf("SetH(%i,%i) : Invalid coords\n" , x,y);
-    return;
-  }
-  landscapecachestatus[(x*2)*8/1024+(y*2)*8/1024*(gs->mapx)*8/1024] = 'u';
-  int i = (map->width/2)*(y)+(x);
-  //printf("GetH(%i,%i) = %f\n" , x,y,map->heightmap[(gs->mapx+1)*y+x]);
-  metalmap[i] = max(0.0,min(255.0,value*255.0));
-
-
-
+	int x = x_ / 2;
+	int y = y_ / 2;
+	if (x < 0 || y < 0)
+		return 0.0;
+	if (x > m->width / 2 - 1 || y > m->height / 2 - 1)
+		return 0.0;
+	int i = (m->width / 2) * y + x;
+	return (float)metalmap[i] / 255.0f;
 }
-float pointdist3d(float ax,float ay,float az,float bx,float by,float bz)
-{
 
-  return sqrt((ax-bx)*(ax-bx)+(ay-by)*(ay-by)+(az-bz)*(az-bz));
+void SetM(CSmfReadMap* m, int x_, int y_, float value)
+{
+	int x = x_ / 2;
+	int y = y_ / 2;
+	if (x < 0 || y < 0)
+		return;
+	if (x > m->width / 2 - 1 || y > m->height / 2 - 1)
+		return;
+
+	markBigSquareDirty(x_ & ~1, y_ & ~1);
+
+	int i = (m->width / 2) * y + x;
+	if (!strokeSeen.count(i)) {
+		strokeSeen.insert(i);
+		currentStroke.type = EDIT_METAL;
+		currentStroke.index.push_back(i);
+		currentStroke.oldValue.push_back((float)metalmap[i]);
+	}
+	metalmap[i] = (unsigned char)std::max(0.0, std::min(255.0, value * 255.0));
 }
-float pointdist2d(float ax,float ay,float bx,float by)
-{
 
-    return sqrt((ax-bx)*(ax-bx)+(ay-by)*(ay-by));
+// Paint one map square with coverage `coverage` (0..1) of colour rgba.
+static void PaintSquare(int sqX, int sqY, const unsigned char rgba[3], float coverage)
+{
+	if (coverage <= 0.0f)
+		return;
+
+	int bx = sqX / tex->bigSquareSize;
+	int by = sqY / tex->bigSquareSize;
+	if (bx < 0 || by < 0 || bx >= tex->numBigSquaresX() || by >= tex->numBigSquaresY())
+		return;
+
+	int idx = tex->paintTexelIndex(bx, by, sqX % tex->bigSquareSize, sqY % tex->bigSquareSize);
+
+	unsigned char old[4];
+	tex->getPaintTexel(idx, old);
+
+	if (!strokeSeen.count(idx)) {
+		strokeSeen.insert(idx);
+		currentStroke.type = EDIT_PAINT;
+		currentStroke.index.push_back(idx);
+		currentStroke.oldValue.push_back((float)old[0]);
+		currentStroke.oldValue.push_back((float)old[1]);
+		currentStroke.oldValue.push_back((float)old[2]);
+		currentStroke.oldValue.push_back((float)old[3]);
+	}
+
+	float a0 = old[3] / 255.0f;
+	float a1 = std::min(1.0f, a0 + coverage);
+
+	unsigned char nw[4];
+	nw[0] = (unsigned char)((old[0] * a0 + rgba[0] * coverage) / a1);
+	nw[1] = (unsigned char)((old[1] * a0 + rgba[1] * coverage) / a1);
+	nw[2] = (unsigned char)((old[2] * a0 + rgba[2] * coverage) / a1);
+	nw[3] = (unsigned char)(a1 * 255.0f);
+
+	tex->setPaintTexel(idx, nw);
 }
-struct MapHeader {
-	char magic[16]; //"spring map file\0"
-	int version;		//must be 1 for now
-	int mapid;			//sort of a checksum of the file
 
-	int mapx;				//must be divisible by 128
-	int mapy;				//must be divisible by 128
-	int squareSize;	//distance between vertices. must be 8
-	int texelPerSquare;		//number of texels per square, must be 8 for now
-	int tilesize;		//number of texels in a tile, must be 32 for now
-	float minHeight;		//height value that 0 in the heightmap corresponds to
-	float maxHeight;		//height value that 0xffff in the heightmap corresponds to
-
-	int heightmapPtr;		//file offset to elevation data (short int[(mapy+1)*(mapx+1)])
-	int typeMapPtr;			//file offset to typedata (unsigned char[mapy/2 * mapx/2])
-	int tilesPtr;				//file offset to tile data (see MapTileHeader)
-	int minimapPtr;			//file offset to minimap (always 1024*1024 dxt1 compresed data with 9 mipmap sublevels)
-	int metalmapPtr;		//file offset to metalmap (unsigned char[mapx/2 * mapy/2])
-	int featurePtr;			//file offset to feature data	(see MapFeatureHeader)
-
-	int numExtraHeaders;		//numbers of extra headers following main header
-};
-void drawsquare(int x, int y,CSmfReadMap* map,CBFGroundTextures* tex,float tilesize)
+// Weight of the brush at offset (dx,dy) in map squares, 0 outside the brush.
+static double brushWeight(double dx, double dy)
 {
-    unsigned char tval;
-  int X,Y = 0;
-  float cx,cy,z1,z2,z3,z4,y1,y2,x1,x2,sqsize;
-  Main->PushTransform(x*2,y*2,0,0,0,0);
-  glActiveTexture(GL_TEXTURE0);
-  glBindTexture(GL_TEXTURE_2D,tex->squares[y*(map->width*8/1024)+x].texture);
-  groundshader.setuniformint("maintex",0);
-  glActiveTexture(GL_TEXTURE1);
-  glBindTexture(GL_TEXTURE_2D,metaltexture[y*map->width*8/1024+x]);
-  groundshader.setuniformint("metaltex",1);
-  glActiveTexture(GL_TEXTURE0);
-   groundshader.setuniformfloat("scale",1.0);
-                 groundshader.setuniformfloat("tx",0);
-                  groundshader.setuniformfloat("ty",0);
- groundshader.setuniformint("mode",mode);
+	double r = brushsize * 64.0;
+	if (r <= 0.0)
+		return 0.0;
 
+	double d;
+	if (brushShape == BRUSH_CIRCLE) {
+		d = sqrt(dx * dx + dy * dy) / r;
+	} else if (brushShape == BRUSH_SQUARE) {
+		d = std::max(fabs(dx), fabs(dy)) / r;
+	} else {
+		// Right triangle with the right angle at (0,0) and the hypotenuse
+		// passing through (r,0) and (0,r): use the distance to the edges.
+		double a = -dx;            // distance to the y axis edge
+	 double b = -dy;            // distance to the x axis edge
+		double c = (dx + dy) / sqrt(2.0); // distance to the hypotenuse
+		if (a < 0 || b < 0 || c < 0)
+			return 0.0;
+		double inradius = r / (1.0 + sqrt(2.0));
+		d = 1.0 - std::min(std::min(a, b), c) / inradius;
+	}
 
-  switch ( mode ){
-      case 0: //Main texture
+	if (d >= 1.0)
+		return 0.0;
+	return pow(1.0 - d, falloff);
+}
 
-        glMatrixMode(GL_TEXTURE);
-        glLoadIdentity();
-        glMatrixMode(GL_MODELVIEW);
-        break;
-      case 1: // Metal map
+static void commitStroke()
+{
+	if (!currentStroke.empty()) {
+		undoStack.commit(currentStroke);
+		currentStroke.index.clear();
+		currentStroke.oldValue.clear();
+		currentStroke.type = EDIT_HEIGHT;
+		strokeSeen.clear();
+		tex->uploadPaintLayers();
+	}
+}
 
+static void applyValue(const Stroke& s, int i, bool restore)
+{
+	if (s.type == EDIT_HEIGHT) {
+		int idx = s.index[i];
+		map->heightmap[idx] = s.oldValue[i];
+		markBigSquareDirty(idx % (gs->mapx + 1), idx / (gs->mapx + 1));
+	} else if (s.type == EDIT_METAL) {
+		int idx = s.index[i];
+		metalmap[idx] = (unsigned char)std::max(0.0, std::min(255.0, (double)s.oldValue[i]));
+		markBigSquareDirty((idx % (map->width / 2)) * 2, (idx / (map->width / 2)) * 2);
+	} else if (s.type == EDIT_PAINT) {
+		unsigned char rgba[4] = {
+			(unsigned char)s.oldValue[i * 4 + 0],
+			(unsigned char)s.oldValue[i * 4 + 1],
+			(unsigned char)s.oldValue[i * 4 + 2],
+			(unsigned char)s.oldValue[i * 4 + 3]
+		};
+		tex->setPaintTexel(s.index[i], rgba);
+	}
+}
 
-         glDisable(GL_LIGHTING);
-        /*glMatrixMode(GL_TEXTURE);
-        glLoadIdentity();
-        glScalef(1.0/map->width/2,1.0/map->height/2,1.0/map->height/2);
-        glTranslatef((float)x*(1.0/map->width/2*map->width/2),(float)y*(1.0/map->height/2*map->height/2),0);
-        glMatrixMode(GL_MODELVIEW);*/
-        break;
+// Returns the inverse stroke needed to redo the undo.
+static Stroke invertStroke(const Stroke& s)
+{
+	Stroke r;
+	r.type = s.type;
 
-  }
-            /*if ( tilesize != pow(2,max(4.0,(double)(min(10,(int)(pointdist2d(x*2+1,y*2+1,-pxx,-pzz)))))))
-            {
-			 tilesize = pow(2,max(4.0,(double)(min(10,3*(int)(pointdist2d(x*2+1,y*2+1,-pxx,-pzz))))));
-			 for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-                landscapecachestatus[i] = 'u';
-            }*/
-            tilesize = pow(2,ts);
-                if (Main->pointinview(x*2,y*2,0) || Main->pointinview(x*2+2,y*2+2,0) || Main->pointinview(x*2+2,y*2,0) || Main->pointinview(x*2,y*2+2,0))
-                {
-            if ( landscapecachestatus[y*map->width*8/1024+x] == 'e' or landscapecachestatus[y*map->width*8/1024+x] == 'u' )
-            {
-            if (mode == 1)
-            {
-            int mmapsqsize = (map->header.mapx/2)/(map->width*8/1024);
-            //printf("Generating metal texture[%i]...\n",y*map->width*8/1024+x);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D,metaltexture[y*map->width*8/1024+x]);
+	for (size_t i = 0; i < s.index.size(); ++i) {
+		int idx = s.index[i];
+		if (s.type == EDIT_HEIGHT) {
+			r.index.push_back(idx);
+			r.oldValue.push_back(map->heightmap[idx]);
+			markBigSquareDirty(idx % (gs->mapx + 1), idx / (gs->mapx + 1));
+		} else if (s.type == EDIT_METAL) {
+			r.index.push_back(idx);
+			r.oldValue.push_back((float)metalmap[idx]);
+			markBigSquareDirty((idx % (map->width / 2)) * 2, (idx / (map->width / 2)) * 2);
+		} else {
+			unsigned char cur[4];
+			tex->getPaintTexel(idx, cur);
+			r.index.push_back(idx);
+			r.oldValue.push_back((float)cur[0]);
+			r.oldValue.push_back((float)cur[1]);
+			r.oldValue.push_back((float)cur[2]);
+			r.oldValue.push_back((float)cur[3]);
+		}
+	}
 
-            for ( int yb = 0; yb < mmapsqsize && yb + y < map->height/2; yb++)
-            {
-                for ( int xb = 0; xb < mmapsqsize && xb + x < map->width/2; xb++)
-                {
-                   // printf("Read metalmap[%i]\n",(map->header.mapy/2*(ya*1024/8+yb))+(xa+xb));
-                    //tval = metalmap[(map->width/2*(y*1024/8+yb))+(x*1024/8+xb)];
-                    tval = (unsigned char)(255.0*GetM(map,x*1024/8+xb*2,y*1024/8+yb*2));
-                   // printf("Write tmpdata[%i] = %i\n",mmapsqsize*yb+xb,(int)tval);
-                    tmpdata[mmapsqsize*yb+xb] = tval;
+	for (size_t i = 0; i < s.index.size(); ++i)
+		applyValue(s, (int)i, true);
 
+	return r;
+}
+
+static void doUndo()
+{
+	if (!undoStack.canUndo())
+		return;
+	Stroke s = undoStack.undoLast();
+	Stroke inverse = invertStroke(s);
+	undoStack.pushRedo(inverse);
+	printf("Undo: %d entries (%s)\n", (int)s.index.size(), modeNames[s.type]);
+}
+
+static void doRedo()
+{
+	if (!undoStack.canRedo())
+		return;
+	Stroke s = undoStack.redoLast();
+	Stroke inverse = invertStroke(s);
+	undoStack.pushUndo(inverse);
+	printf("Redo: %d entries\n", (int)s.index.size());
+}
+
+// Applies the brush centred on the cursor position (in map squares).
+static void applyBrush()
+{
+	int centreX = (int)(mx * 64.0);
+	int centreY = (int)(mz * 64.0);
+	int r = (int)(brushsize * 64.0) + 1;
+
+	if (r <= 0)
+		return;
+
+	const bool smooth = Main->getkey(SDL_SCANCODE_S);
+
+	for (int dy = -r; dy <= r; ++dy) {
+		for (int dx = -r; dx <= r; ++dx) {
+			double w = brushWeight(dx, dy);
+			if (w <= 0.0)
+				continue;
+
+		 int x = centreX + dx;
+			int y = centreY + dy;
+			if (x < 0 || y < 0 || x > gs->mapx || y > gs->mapy)
+				continue;
+
+			if (mode == MODE_HEIGHT) {
+				if (smooth) {
+					float avg = (GetH(map, x - 1, y) + GetH(map, x + 1, y) +
+					             GetH(map, x, y - 1) + GetH(map, x, y + 1)) / 4.0f;
+					float nv = hval * (float)w + avg * (1.0f - (float)w);
+					SetH(map, x, y, nv);
+				} else {
+					float cur = GetH(map, x, y);
+					float nv = hval * (float)w + cur * (1.0f - (float)w);
+					SetH(map, x, y, nv);
+				}
+			} else if (mode == MODE_METAL) {
+				if (smooth) {
+					float avg = (GetM(map, x - 2, y) + GetM(map, x + 2, y) +
+					             GetM(map, x, y - 2) + GetM(map, x, y + 2)) / 4.0;
+					float nv = hval * (float)w + avg * (1.0f - (float)w);
+					SetM(map, x, y, nv);
+				} else {
+					float cur = GetM(map, x, y);
+					float nv = hval * (float)w + cur * (1.0f - (float)w);
+					SetM(map, x, y, nv);
+				}
+			} else if (mode == MODE_PAINT || mode == MODE_COLOUR) {
+				unsigned char col[4];
+				if (mode == MODE_PAINT)
+					browser.sample(browser.selected, (double)x * 8.0, (double)y * 8.0, paintScale, col);
+				else
+					memcpy(col, fixedColour, 4);
+
+				PaintSquare(x, y, col, (float)w);
+			}
+		}
+	}
+
+	tex->uploadPaintLayers();
+}
+
+static void drawsquare(int x, int y, CSmfReadMap* m, CBFGroundTextures* t, float tilesize)
+{
+	Main->PushTransform(x * 2, y * 2, 0, 0, 0, 0);
+
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, t->squares[y * bigSquaresX() + x].texture);
+	groundshader.setuniformint("maintex", 0);
+
+	glActiveTexture(GL_TEXTURE1);
+	glBindTexture(GL_TEXTURE_2D, metaltexture[y * bigSquaresX() + x]);
+	groundshader.setuniformint("metaltex", 1);
+
+	GLuint paint = t->paintTexture(x, y);
+	glActiveTexture(GL_TEXTURE2);
+	glBindTexture(GL_TEXTURE_2D, paint ? paint : emptyTexture);
+	groundshader.setuniformint("painttex", 2);
+	groundshader.setuniformint("hasPaint", paint ? 1 : 0);
+
+	glActiveTexture(GL_TEXTURE0);
+	groundshader.setuniformfloat("scale", 1.0);
+	groundshader.setuniformfloat("tx", 0);
+	groundshader.setuniformfloat("ty", 0);
+	groundshader.setuniformint("mode", mode);
+
+	if (mode == MODE_METAL)
+		glDisable(GL_LIGHTING);
+
+	tilesize = pow(2, ts);
+
+	if (Main->pointinview(x * 2, y * 2, 0) || Main->pointinview(x * 2 + 2, y * 2 + 2, 0) ||
+		Main->pointinview(x * 2 + 2, y * 2, 0) || Main->pointinview(x * 2, y * 2 + 2, 0))
+	{
+		if (landscapecachestatus[y * bigSquaresX() + x] == 'e' || landscapecachestatus[y * bigSquaresX() + x] == 'u')
+		{
+			if (mode == MODE_METAL)
+			{
+				int mmapsqsize = (m->header.mapx / 2) / bigSquaresX();
+
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, metaltexture[y * bigSquaresX() + x]);
+
+                for (int yb = 0; yb < mmapsqsize && yb + y < m->height / 2; ++yb) {
+                    for (int xb = 0; xb < mmapsqsize && xb + x < m->width / 2; ++xb)
+                        tmpdata[mmapsqsize * yb + xb] = (unsigned char)(255.0 * GetM(m, x * 1024 / 8 + xb * 2, y * 1024 / 8 + yb * 2));
                 }
-            }
-            gluBuild2DMipmaps(GL_TEXTURE_2D,1,mmapsqsize,mmapsqsize,GL_LUMINANCE,GL_UNSIGNED_BYTE,tmpdata);
-            glActiveTexture(GL_TEXTURE0);
-            //printf("Generated metal textures succesfully\n");
-            }
-            if ( mode == 0)
+                gluBuild2DMipmaps(GL_TEXTURE_2D, 1, mmapsqsize, mmapsqsize, GL_LUMINANCE, GL_UNSIGNED_BYTE, tmpdata);
                 glActiveTexture(GL_TEXTURE0);
-                glBindTexture(GL_TEXTURE_2D,tex->squares[y*(map->width*8/1024)+x].texture);
+            }
 
-             glNewList(landscapecache[y*map->width*8/1024+x],GL_COMPILE_AND_EXECUTE);
-			  //printf("tilesize=%f\n" , tilesize);
-			  if ( mode == 1 )
-                {
+		 glNewList(landscapecache[y * bigSquaresX() + x], GL_COMPILE_AND_EXECUTE);
 
-                }
-			  for ( Y = 0; Y < 1024.0/tilesize; Y++)
-			    for ( X = 0; X < 1024.0/tilesize; X++)
-			    {
-			      sqsize = 1024.0/tilesize;
+			int sqsize = (int)(1024.0 / tilesize);
 
+			for (int Y = 0; Y < 1024.0 / tilesize; ++Y) {
+				for (int X = 0; X < 1024.0 / tilesize; ++X) {
+					float z1 = GetH(m, 1.0 / sqsize + x * 128 + X * tilesize / 8, -1.0 / sqsize + y * 128 + Y * tilesize / 8);
+					float z2 = GetH(m, 1.0 / sqsize + x * 128 + (X + 1) * tilesize / 8, -1.0 / sqsize + y * 128 + Y * tilesize / 8);
+                    float z3 = GetH(m, 1.0 / sqsize + x * 128 + (X + 1) * tilesize / 8, -1.0 / sqsize + y * 128 + (Y + 1) * tilesize / 8);
+                    float z4 = GetH(m, 1.0 / sqsize + x * 128 + X * tilesize / 8, -1.0 / sqsize + y * 128 + (Y + 1) * tilesize / 8);
 
-			    /*glMatrixMode(GL_TEXTURE);
-                    glLoadIdentity();
+                    float x1 = X * (1.0 / sqsize * 2.0);
+                    float x2 = (X + 1) * (1.0 / sqsize * 2.0);
+                    float y1 = Y * (1.0 / sqsize * 2.0);
+                    float y2 = (Y + 1) * (1.0 / sqsize * 2.0);
 
-			      glScalef(1.0/sqsize,1.0/sqsize,1.0/sqsize);
-			      glTranslatef((float)X*(1.0/sqsize*sqsize),(float)Y*(1.0/sqsize*sqsize),0);
+                    glBegin(GL_TRIANGLES);
 
-
-			     glMatrixMode(GL_MODELVIEW);*/
-
-			     // glShadeModel(GL_SMOOTH);
-			      //Main->PushTransform(X*(1.0/sqsize*2.0),Y*(1.0/sqsize*2.0),0,0,0,0);
-			      glBegin(GL_TRIANGLES);
-			      glTexCoord2f(0,0);
-			      cx = X*(tilesize*4)/tilesize*(tilesize/32.0);
-			      cy = Y*(tilesize*4)/tilesize*(tilesize/32.0);
-			       /*glVertex3f(-1.0/sqsize,-1.0/sqsize,GetH(map,1.0/sqsize+x*128-1+cx,-1.0/sqsize+y*128-1+cy));
-			      glTexCoord2f(1.0,0);
-			      glVertex3f(1.0/sqsize,-1.0/sqsize,GetH(map,-1.0/sqsize+x*128-1+cx,-1.0/sqsize+y*128-1+cy));
-			      glTexCoord2f(1.0,1.0);
-			      glVertex3f(1.0/sqsize,1.0/sqsize,GetH(map,1.0/sqsize+x*128+cx,1.0/sqsize+y*128+cy));
-			      glTexCoord2f(0,1.0);
-			      glVertex3f(-1.0/sqsize,1.0/sqsize,GetH(map,-1.0/sqsize+x*128+cx,1.0/sqsize+y*128+cy));*/
-                    z1 = GetH(map,1.0/sqsize+x*128+cx,-1.0/sqsize+y*128+cy);
-                    z2 = GetH(map,1.0/sqsize+x*128+tilesize/8+cx,-1.0/sqsize+y*128+cy);
-                    z3 = GetH(map,1.0/sqsize+x*128+tilesize/8+cx,-1.0/sqsize+y*128+tilesize/8+cy);
-                    z4 = GetH(map,1.0/sqsize+x*128+cx,-1.0/sqsize+y*128+tilesize/8+cy);
-
-                    x1 = X*(1.0/sqsize*2.0);
-                    x2 = (X+1)*(1.0/sqsize*2.0);
-                    y1 = Y*(1.0/sqsize*2.0);
-                    y2 = (Y+1)*(1.0/sqsize*2.0);
-
-                    // --1--
-                    v3 v1;
-                    v3 v2;
-                    v3 n;
-                    v1.x = x2-x1;v1.y = 0;v1.z = z2-z1;
-                    v2.x = x2-x1;v2.y = y2-y1;v2.z = z3-z1;
-                    n = v1.crossproduct(v2);
-                    glNormal3f(n.x,n.y,n.z);
-                    glTexCoord2f((float)X*(1.0/sqsize), (float)Y*(1.0/sqsize));
+                    v3 a, b, n;
+                    a.x = x2 - x1; a.y = 0; a.z = z2 - z1;
+                    b.x = x2 - x1; b.y = y2 - y1; b.z = z3 - z1;
+                    n = a.crossproduct(b);
+                    glNormal3f(n.x, n.y, n.z);
+                    glTexCoord2f((float)X / sqsize, (float)Y / sqsize);
                     glVertex3f(x1, y1, z1);
-                    glTexCoord2f((float)X*(1.0/sqsize)+1.0/sqsize, (float)Y*(1.0/sqsize));
+                    glTexCoord2f((float)(X + 1) / sqsize, (float)Y / sqsize);
                     glVertex3f(x2, y1, z2);
-                    glTexCoord2f((float)X*(1.0/sqsize)+1.0/sqsize, (float)Y*(1.0/sqsize)+1.0/sqsize);
+                    glTexCoord2f((float)(X + 1) / sqsize, (float)(Y + 1) / sqsize);
                     glVertex3f(x2, y2, z3);
-                    //poly += 1;
 
-                    // --2--
-                    v1.x = x1-x2;v1.y = 0;v1.z = z4-z3;
-                    v2.x = x1-x2;v2.y = y1-y2;v2.z = z1-z3;
-                    n = v1.crossproduct(v2);
-                    glNormal3f(n.x,n.y,n.z);
-                    glTexCoord2f((float)X*(1.0/sqsize)+1.0/sqsize, (float)Y*(1.0/sqsize)+1.0/sqsize);
+                    a.x = x1 - x2; a.y = 0; a.z = z4 - z3;
+                    b.x = x1 - x2; b.y = y1 - y2; b.z = z1 - z3;
+                    n = a.crossproduct(b);
+                    glNormal3f(n.x, n.y, n.z);
+                    glTexCoord2f((float)(X + 1) / sqsize, (float)(Y + 1) / sqsize);
                     glVertex3f(x2, y2, z3);
-                    glTexCoord2f((float)X*(1.0/sqsize), (float)Y*(1.0/sqsize)+1.0/sqsize);
+                    glTexCoord2f((float)X / sqsize, (float)(Y + 1) / sqsize);
                     glVertex3f(x1, y2, z4);
-                    glTexCoord2f((float)X*(1.0/sqsize), (float)Y*(1.0/sqsize));
+                    glTexCoord2f((float)X / sqsize, (float)Y / sqsize);
                     glVertex3f(x1, y1, z1);
-                    //poly += 1;
 
-			      glEnd();
-
-			      //Main->PopTransform();
-
-			    }
-			    glEndList();
-			    landscapecachestatus[y*map->width*8/1024+x] = 'o';
-            }else{
-			    glCallList(landscapecache[y*map->width*8/1024+x]);}
+                    glEnd();
                 }
-            switch ( mode ){
-      case 1: // Metal map
+            }
 
+            glEndList();
+            landscapecachestatus[y * bigSquaresX() + x] = 'o';
+        } else {
+            glCallList(landscapecache[y * bigSquaresX() + x]);
+        }
+    }
 
+    if (mode == MODE_METAL)
         glEnable(GL_LIGHTING);
-        break;
 
-  }
-  glBindTexture(GL_TEXTURE_2D,0);
-			  Main->PopTransform();
+    glBindTexture(GL_TEXTURE_2D, 0);
+    Main->PopTransform();
 }
+
 static std::string FindFont()
 {
 	const char* env = getenv("SPRINGMAPEDITOR_FONT");
@@ -426,10 +508,8 @@ static std::string FindFont()
 		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	};
 	for (const char* path : candidates)
-	{
 		if (access(path, R_OK) == 0)
 			return path;
-	}
 	return "";
 }
 
@@ -460,645 +540,575 @@ static void handle_interrupt(int sig)
 	interrupt_requested = 1;
 }
 
-int main(int argc, char ** argv)
+// Draws the help/status overlay in screen space.
+static void drawOverlay(FTGLPixmapFont& font, bool haveFont)
 {
-	char txt[1024];
-	bool quite = false;
-	float p0,p1,p2,p3,cmod;
-	bool checkOnly = (argc > 1 && strcmp(argv[1], "--check") == 0);
-	if (!checkOnly && argc < 2)
-	{
-		fprintf(stderr, "Usage: %s <map.smf> [map directory]\n", argv[0]);
-		fprintf(stderr, "       %s --check    (initialize video/OpenGL and exit)\n", argv[0]);
-		return 1;
-	}
-	mode = 0; //Main texture
-	const char * smffile = checkOnly ? NULL : argv[1];
-	std::string smfpathstorage;
-	if (argc > 2 && !checkOnly)
-	{
-		smfpathstorage = argv[2];
-	}
-	else if (!checkOnly)
-	{
-		std::string mapfile = smffile;
-		size_t slash = mapfile.find_last_of("/\\");
-		smfpathstorage = (slash == std::string::npos) ? "." : mapfile.substr(0, slash);
-	}
-	const char * smfpath = smfpathstorage.c_str();
-	Main = new engine;
-	gs = new gst;
-	std::string fontpath = FindFont();
-	bool haveFont = !fontpath.empty();
-	FTGLPixmapFont font(haveFont ? fontpath.c_str() : "");
+	Main->OverlayBegin();
+
+	// Status line at the bottom left.
+	char line[512];
+	snprintf(line, sizeof(line), "%.1f fps   mode: %s   brush: %s   radius: %d   falloff: %.2f   zoom: %.1f",
+		Main->getfps(), modeNames[mode], shapeNames[brushShape], (int)(brushsize * 64), falloff, camDist);
+	if (haveFont)
+		font.Render(line, -1, FTPoint(8, 10));
+
+	snprintf(line, sizeof(line), "brush value: %.3f   ground height: %.3f   undo stack: %d", hval, cval, (int)undoStack.undoSize());
+	if (haveFont)
+		font.Render(line, -1, FTPoint(8, 26));
+
+	// Key reference on the right.
+	const int panelW = 260;
+	const int panelX = Main->width - panelW - 6;
+
+	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
+	glBegin(GL_QUADS);
+	glVertex2f(panelX, 0);
+	glVertex2f(Main->width, 0);
+	glVertex2f(Main->width, Main->height);
+	glVertex2f(panelX, Main->height);
+	glEnd();
+	glColor4f(1, 1, 1, 1);
+
 	if (haveFont)
 	{
+		font.FaceSize(10);
+		int y = Main->height - 12;
+		const char* keys[][2] = {
+			{"Left drag", "paint brush"},
+			{"Right drag", "orbit camera"},
+			{"Wheel / Q E", "zoom"},
+			{"Arrows", "pan pivot"},
+			{"A / Z", "brush size"},
+			{"C / X", "brush value"},
+			{"S", "smooth brush"},
+			{"B", "pick ground value"},
+			{"P", "brush shape"},
+			{"- / =", "brush falloff"},
+			{"0 1 2 3", "height metal texture colour"},
+			{"T / Y", "texture detail"},
+			{"W", "wireframe"},
+			{"F", "fullscreen"},
+			{"G", "texture browser"},
+			{"[ ]", "select texture"},
+			{", .", "texture scale"},
+			{"Ctrl+Z", "undo"},
+			{"Ctrl+Shift+Z", "redo"},
+			{"Esc", "quit"},
+		};
+		for (int i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); ++i) {
+			char text[128];
+			snprintf(text, sizeof(text), "%-13s %s", keys[i][0], keys[i][1]);
+			font.Render(text, -1, FTPoint(panelX + 6, y));
+			y -= 13;
+		}
 		font.FaceSize(12);
 	}
-	else
+
+	if (browserVisible && !browser.empty())
 	{
-		fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
-		                "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
-	}
+		const int thumb = 40;
+		const int cols = 4;
+		int bx0 = panelX - (cols * thumb + 16);
+		if (bx0 < 8) bx0 = 8;
 
-	if (!Main->Init3d(1024,768,8,false))
-	{
-		fprintf(stderr, "Failed to initialize the video subsystem.\n");
-		return 1;
-	}
-	if (checkOnly)
-	{
-		printf("SDL video driver: %s\n", SDL_GetCurrentVideoDriver());
-		printf("OpenGL vendor:    %s\n", glGetString(GL_VENDOR));
-		printf("OpenGL renderer:  %s\n", glGetString(GL_RENDERER));
-		printf("OpenGL version:   %s\n", glGetString(GL_VERSION));
-		Main->Terminate();
-		return 0;
-	}
-	//SDL_WM_GrabInput(SDL_GRAB_ON);
-	//font->TryConstructFont("Luxy.ttf",32,255,0.027f);
-	l0.lightinit(GL_LIGHT0,-50,50,50,1,1,1,1);
-
-	float sqsize;
-	float hval = 0;
-	float tilesize = 64.0;
-	int poly = 0;
-	float tilesize2 = 16.0;
-	CSmfReadMap* map;
-	
-	map = (CSmfReadMap*)(CReadMap::LoadMap(smffile,smfpath));
-	if (map == NULL)
-	{
-		fprintf(stderr, "Failed to load map '%s' from '%s'\n", smffile, smfpath);
-		Main->Terminate();
-		return 1;
-	}
-    int mw = map->width;
-    int mh = map->height;
-	std::string fragmentShader = FindAsset("groundshader.frag");
-	std::string vertexShader = FindAsset("groundshader.vert");
-	groundshader.createfromfiles(fragmentShader.data(), vertexShader.data());
-	//cout << gluErrorString(glGetError()) << endl;
-	landscapecache = (GLint*)malloc(map->height*8/1024*map->width*8/1024*sizeof(GLint));
-	landscapecachestatus = (char*)malloc(map->height*8/1024*map->width*8/1024+1);
-	landscapecache[0] = glGenLists(map->height*8/1024*map->width*8/1024);
-
-	for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-	{
-	    if ( i > 0)
-            landscapecache[i] = landscapecache[0] + i;
-        landscapecachestatus[i] = 'e'; // Empty
-	}
-	landscapecachestatus[map->height*8/1024*map->width*8/1024] = 0;
-	metaltexture = (GLuint*)malloc(sizeof(GLuint)*map->height*8/1024*map->width*8/1024);
-
-	glGenTextures(map->height*8/1024*map->width*8/1024,metaltexture);
-
-	//cout << map->height*8/1024*map->width*8/1024 << endl;
-    unsigned char tval;
-
-	MapBitmapInfo mbi;
-    int mmapsqsize = (int)((float)map->header.mapx/2.0/(map->width*8.0/1024.0));
-	printf("Metal map square size: %i\n", mmapsqsize);
-	metalmap = map->GetInfoMap ("metal", &mbi);
-
-    tmpdata = (unsigned char*)malloc(sizeof(unsigned char)*mmapsqsize*mmapsqsize);
-	/*
-	unsigned char * tmpdata;
-	tmpdata = (unsigned char*)malloc(sizeof(unsigned char)*mmapsqsize*mmapsqsize);
-	for ( int ya = 0; ya < map->height*8/1024; ya++)
-	{
-	    for ( int xa = 0; xa < map->width*8/1024; xa++)
-        {
-            printf("Generating metal texture[%i]...\n",ya*map->width*8/1024+xa);
-            glBindTexture(GL_TEXTURE_2D,metaltexture[ya*map->width*8/1024+xa]);
-            for ( int yb = 0; yb < mmapsqsize && yb + ya < map->header.mapy/2; yb++)
-            {
-                for ( int xb = 0; xb < mmapsqsize && xb + xa < map->header.mapx/2; xb++)
-                {
-                   // printf("Read metalmap[%i]\n",(map->header.mapy/2*(ya*1024/8+yb))+(xa+xb));
-                    tval = metalmap[(map->header.mapx/2*(ya*1024/8+yb))+(xa*1024/8+xb)];
-                   // printf("Write tmpdata[%i] = %i\n",mmapsqsize*yb+xb,(int)tval);
-                    tmpdata[mmapsqsize*yb+xb] = tval;
-
-                }
-            }
-            gluBuild2DMipmaps(GL_TEXTURE_2D,1,mmapsqsize,mmapsqsize,GL_LUMINANCE,GL_UNSIGNED_BYTE,tmpdata);
-        }
-	}
-	printf("Generated metal textures succesfully");*/
-
-	//glTexImage2D(GL_TEXTURE_2D,0,1,mbi.width,mbi.height,0,GL_LUMINANCE,GL_UNSIGNED_BYTE,metalmap);
-
-	glEnable(GL_BLEND);
-	glEnable(GL_LIGHTING);
-	glEnable(GL_NORMALIZE);
-	glEnable(GL_TEXTURE_2D);
-	CBFGroundTextures * tex;
-	tex = new CBFGroundTextures((CSmfReadMap*)map);
-	printf("Entering main loop\n");
-	int x,y,z,X,Y,Z;
-	int MAP_SIZEX = map->width+1;
-	int MAP_SIZEY = map->height+1;
-	int STEP_SIZE = 16;
-	
-	float cval = 0.0;
-
-	SDL_SetWindowRelativeMouseMode(Main->screen, true);
-
-	Main->SetCameraPos(0,0,-10);
-	pxx = -map->width*8/1024;
-	pzz = -map->height*8/1024;
-	signal(SIGINT, handle_interrupt);
-	signal(SIGTERM, handle_interrupt);
-
-	while (quite == false && !Main->quit && !interrupt_requested)
-	{
-	    
-	    //printf("Begin frame\n");
-		Main->clearscreen(0.5,0.5,0.5,1.0);
-		glLoadIdentity();
-		/*glDrawPixels( font->rend->width,
-			     font->rend->height,
-			     GL_LUMINANCE_ALPHA,
-			     GL_UNSIGNED_BYTE,
-			     font->rend->buffer);*/
-        Main->PushTransform(0,0,0,90.0,0,0);// Render a rectangle offscreen to make editing easier, by haveing flat selection plane
-		Main->ExtractFrustum();
-        glBegin(GL_QUADS);
-		glVertex3f(0.0,0.0,0.01);
-		glVertex3f(map->width*8/1024*2,0.0,0.0);
-		glVertex3f(map->width*8/1024*2,map->height*8/1024*2,0);
-		glVertex3f(0.0,map->height*8/1024*2,0);
-		glEnd();
-		Main->PopTransform();
-		Main->Make2DPositionInto3DPosition((float)Main->mousex,(float)Main->mousey,&mx,&my,&mz);
-		Main->clearscreen(0.5,0.5,0.5,1.0);
-		
-		//font->RenderString(rxx,ryy,6.0,txt);
-		if ( Main->getkey(SDL_SCANCODE_ESCAPE))
-			quite = true;
-
-		if ( Main->up)
-		{
-			pxx += 20 / max(1.0,(double)Main->getfps());
-		}
-		//printf("pxx=%f\n",pxx);
-		if ( Main->getkey(SDL_SCANCODE_Q))
-		{
-			pyy += 20 / max(1.0,(double)Main->getfps());
-		}
-		for ( int i = 0; i < 9; i++)
-        {
-            if (Main->getkey((SDL_Scancode)(SDL_SCANCODE_0 + i)))
-            {
-                for ( int i2 = 0; i2 < map->height*8/1024*map->width*8/1024; i2++)
-                    landscapecachestatus[i2] = 'u';
-                mode = i;
-            }
-        }
-		if ( Main->left)
-		{
-			pzz += 20 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->down)
-		{
-			pxx -= 20 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->getkey(SDL_SCANCODE_E))
-		{
-			pyy -= 20 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->right)
-		{
-			pzz -= 20 / max(1.0,(double)Main->getfps());
-		}
-		
-		if ( Main->getkey(SDL_SCANCODE_L))
-		{
-			if (mode == 1)
-				glDrawPixels(mbi.width,mbi.height,GL_LUMINANCE,GL_UNSIGNED_BYTE,metalmap);
-			else if (mode == 0)
-				glDrawPixels(gs->mapx+1,gs->mapy+1,GL_LUMINANCE,GL_FLOAT,map->heightmap);
-		}
-		
-        if ( Main->getkey(SDL_SCANCODE_A) and brushsize < 100)
-		{
-			brushsize += 5 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->getkey(SDL_SCANCODE_Z) and brushsize > 0)
-		{
-			brushsize -= 5 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->getkey(SDL_SCANCODE_C) and hval < FLT_MAX)
-		{
-			hval += 5 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->getkey(SDL_SCANCODE_X) and brushsize > 0)
-		{
-			hval -= 5 / max(1.0,(double)Main->getfps());
-		}
-		if ( Main->getkey(SDL_SCANCODE_B) and brushsize > 0)
-		{
-			hval = cval;
-		}
-		
-		if ( Main->mouseleft )
-		{
-            SDL_HideCursor();
-	    
-            ryy += (float)Main->mouserelx/10.0;
-            rzz += (float)Main->mouserely/10.0;
-            //printf("Mouse xrel=%i Mouse yrel=%i\n",Main->mouserelx,Main->mouserely);
-		}else{
-		    SDL_ShowCursor();
-		}
-		if ( Main->getkey(SDL_SCANCODE_T) and ts > 4)
-		{
-
-			ts -= 1;
-			for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-                landscapecachestatus[i] = 'u';
-
-		}
-		if ( Main->getkey(SDL_SCANCODE_Y) and ts < 10)
-		{
-			ts += 1;
-			for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-                landscapecachestatus[i] = 'u';
-		}
-
-
-		if ( Main->getkey(SDL_SCANCODE_W))
-		{
-			glPolygonMode(GL_FRONT,GL_LINE);
-			glPolygonMode(GL_BACK,GL_LINE);
-		}else{
-			glPolygonMode(GL_FRONT,GL_FILL);
-			glPolygonMode(GL_BACK,GL_FILL);
-		}
-
-		//glColorMaterial(GL_FRONT_AND_BACK,GL_DIFFUSE);
-		if ( Main->getkey(SDL_SCANCODE_F))
-		{
-			Main->ToggleFullScreen();
-
-		}
-        Main->SetCameraRotation(rxx,ryy,rzz);
-		Main->SetCameraPos(pxx,pyy,pzz);
-        l0.setpos(0,-10,0);
-Main->PushTransform(0,0,0,90.0,0,0);
-
-      //  mh = 128;
-	for ( int y_ = 0; y_ < mh*8/1024;y_++)
-		{
-
-			for (  int x_ = 0; x_ < mw*8/1024;x_++)
-			{
-
-              groundshader.useshader();
-              //printf("drawsquare(%i,%i,map,tex,pow(2,%f));\n",x,y,ts);
-			  drawsquare(x_,y_,map,tex,pow(2,ts));
-			  glUseProgram(0);
-			}
-		}
-
-		glBindTexture(GL_TEXTURE_2D,0);
-		glEnable(GL_BLEND);		// Turn Blending On
-        //glDisable(GL_DEPTH_TEST);
-        glBlendFunc(GL_SRC_ALPHA,GL_ONE);
-        glDisable(GL_LIGHTING);
+		glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
+		int rows = (browser.count() + cols - 1) / cols;
+		int panelH = rows * thumb + 24;
 		glBegin(GL_QUADS);
-		glColor4f(0.0,0.4,1.0,0.4);
-		glVertex3f(0.0,0.0,0.01);
-		glVertex3f(map->width*8/1024*2,0.0,0.01);
-		glVertex3f(map->width*8/1024*2,map->height*8/1024*2,0.01);
-		glVertex3f(0.0,map->height*8/1024*2,0.01);
-
+		glVertex2f(bx0, Main->height - panelH);
+		glVertex2f(bx0 + cols * thumb + 12, Main->height - panelH);
+		glVertex2f(bx0 + cols * thumb + 12, Main->height);
+		glVertex2f(bx0, Main->height);
 		glEnd();
-        glDisable(GL_BLEND);
-        	// Turn Blending Off
-        //glEnable(GL_DEPTH_TEST);
-		glColor4f(1,1,1,1);
+		glColor4f(1, 1, 1, 1);
+
+		if (haveFont)
+		{
+			font.FaceSize(10);
+			char text[128];
+			snprintf(text, sizeof(text), "Textures (%d), G to close", browser.count());
+			font.Render(text, -1, FTPoint(bx0 + 6, Main->height - 14));
+			font.FaceSize(12);
+		}
+
+		glDisable(GL_LIGHTING);
+		// The terrain is drawn with shaders, so fixed-function texturing is off
+		// elsewhere; the thumbnails need it.
+		glEnable(GL_TEXTURE_2D);
+		for (int i = 0; i < browser.count(); ++i) {
+			int col = i % cols;
+			int row = i / cols;
+		 float x0 = bx0 + 6 + col * thumb;
+            float y0 = Main->height - 20 - (row + 1) * thumb;
+
+			glBindTexture(GL_TEXTURE_2D, browser.at(i).glTex);
+		 glBegin(GL_QUADS);
+		 glTexCoord2f(0, 0); glVertex2f(x0, y0);
+		 glTexCoord2f(1, 0); glVertex2f(x0 + thumb, y0);
+		 glTexCoord2f(1, 1); glVertex2f(x0 + thumb, y0 + thumb);
+		 glTexCoord2f(0, 1); glVertex2f(x0, y0 + thumb);
+		 glEnd();
+
+			if (i == browser.selected) {
+			 glBindTexture(GL_TEXTURE_2D, 0);
+                glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+                glBegin(GL_LINE_LOOP);
+                glVertex2f(x0 - 1, y0 - 1);
+                glVertex2f(x0 + thumb + 1, y0 - 1);
+                glVertex2f(x0 + thumb + 1, y0 + thumb + 1);
+                glVertex2f(x0 - 1, y0 + thumb + 1);
+                glEnd();
+                glColor4f(1, 1, 1, 1);
+            }
+        }
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    glDisable(GL_BLEND);
+    Main->OverlayEnd();
+}
+
+static int browserHitTest()
+{
+	if (!browserVisible || browser.empty())
+		return -1;
+
+	const int panelW = 260;
+	const int panelX = Main->width - panelW - 6;
+	const int thumb = 40;
+	const int cols = 4;
+	int bx0 = panelX - (cols * thumb + 16);
+	if (bx0 < 8) bx0 = 8;
+
+	int px = Main->mousex;
+	int py = Main->mousey; // from the top
+	if (px < bx0 || px > bx0 + cols * thumb + 12)
+		return -1;
+	int rows = (browser.count() + cols - 1) / cols;
+	if (py > Main->height - 20 || py < Main->height - 20 - rows * thumb)
+		return -1;
+
+	int row = (Main->height - 20 - py) / thumb;
+	int col = (px - bx0 - 6) / thumb;
+	if (row < 0 || col < 0 || col >= cols)
+		return -1;
+	int index = row * cols + col;
+	if (index >= browser.count())
+		return -1;
+	return index;
+}
+
+int main(int argc, char** argv)
+{
+	char txt[512];
+	bool quite = false;
+	bool checkOnly = (argc > 1 && strcmp(argv[1], "--check") == 0);
+
+	std::string textureDir;
+	const char* smffile = NULL;
+	std::string smfpathstorage;
+
+	for (int i = 1; i < argc; ++i) {
+		if (strcmp(argv[i], "--check") == 0) {
+			checkOnly = true;
+		} else if (strcmp(argv[i], "-textures") == 0 && i + 1 < argc) {
+			textureDir = argv[++i];
+		} else if (strncmp(argv[i], "-textures=", 10) == 0) {
+			textureDir = argv[i] + 10;
+		} else if (strcmp(argv[i], "-browser") == 0) {
+			startWithBrowser = true;
+		} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+			printf("Usage: %s <map.smf> [map directory] [-textures <dir>] [-browser]\n", argv[0]);
+			printf("       %s --check\n", argv[0]);
+			return 0;
+		} else if (smffile == NULL) {
+			smffile = argv[i];
+		}
+    }
+
+    if (!checkOnly && smffile == NULL)
+    {
+        fprintf(stderr, "Usage: %s <map.smf> [map directory] [-textures <dir>]\n", argv[0]);
+        fprintf(stderr, "       %s --check    (initialize video/OpenGL and exit)\n", argv[0]);
+        return 1;
+    }
+
+    mode = MODE_HEIGHT;
+    browserVisible = startWithBrowser;
+    if (argc > 2 && !checkOnly && strcmp(argv[1], "--check") != 0 && argv[2][0] != '-')
+        smfpathstorage = argv[2];
+    else if (!checkOnly)
+    {
+        std::string mapfile = smffile;
+        size_t slash = mapfile.find_last_of("/\\");
+        smfpathstorage = (slash == std::string::npos) ? "." : mapfile.substr(0, slash);
+    }
+
+    Main = new engine;
+    gs = new gst;
+
+    std::string fontpath = FindFont();
+    bool haveFont = !fontpath.empty();
+    FTGLPixmapFont font(haveFont ? fontpath.c_str() : "");
+    if (haveFont)
+        font.FaceSize(12);
+    else
+        fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
+                        "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
+
+    if (!Main->Init3d(1024, 768, 8, false))
+    {
+        fprintf(stderr, "Failed to initialize the video subsystem.\n");
+        return 1;
+    }
+
+    glGenTextures(1, &emptyTexture);
+    glBindTexture(GL_TEXTURE_2D, emptyTexture);
+    {
+        unsigned char transparent[4] = {0, 0, 0, 0};
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, transparent);
+    }
+
+    if (checkOnly)
+    {
+        printf("SDL video driver: %s\n", SDL_GetCurrentVideoDriver());
+        printf("OpenGL vendor:    %s\n", glGetString(GL_VENDOR));
+        printf("OpenGL renderer:  %s\n", glGetString(GL_RENDERER));
+        printf("OpenGL version:   %s\n", glGetString(GL_VERSION));
+        Main->Terminate();
+        return 0;
+    }
+
+    l0.lightinit(GL_LIGHT0, -50, 50, 50, 1, 1, 1, 1);
+
+    map = (CSmfReadMap*)CReadMap::LoadMap(smffile, smfpathstorage.c_str());
+    if (map == NULL)
+    {
+        fprintf(stderr, "Failed to load map '%s' from '%s'\n", smffile, smfpathstorage.c_str());
+        Main->Terminate();
+        return 1;
+    }
+
+    std::string fragmentShader = FindAsset("groundshader.frag");
+    std::string vertexShader = FindAsset("groundshader.vert");
+    groundshader.createfromfiles(fragmentShader.data(), vertexShader.data());
+
+    int totalSquares = bigSquaresX() * bigSquaresY();
+    landscapecache = (GLint*)malloc(totalSquares * sizeof(GLint));
+    landscapecachestatus = (char*)malloc(totalSquares + 1);
+    landscapecache[0] = glGenLists(totalSquares);
+    for (int i = 0; i < totalSquares; ++i) {
+        if (i > 0)
+            landscapecache[i] = landscapecache[0] + i;
+        landscapecachestatus[i] = 'e'; // empty
+    }
+    landscapecachestatus[totalSquares] = 0;
+
+    metaltexture = (GLuint*)malloc(sizeof(GLuint) * totalSquares);
+    glGenTextures(totalSquares, metaltexture);
+
+    MapBitmapInfo mbi;
+    mbi.width = map->width / 2;
+    mbi.height = map->height / 2;
+    metalmap = map->GetInfoMap("metal", &mbi);
+    if (!metalmap) {
+        mbi.width = map->width / 2;
+        mbi.height = map->height / 2;
+        metalmap = (unsigned char*)calloc((size_t)(map->width / 2) * (map->height / 2), 1);
+    }
+
+    int mmapsqsize = (int)((float)map->header.mapx / 2.0 / (double)bigSquaresX());
+    printf("Metal map square size: %i\n", mmapsqsize);
+    tmpdata = (unsigned char*)malloc(sizeof(unsigned char) * mmapsqsize * mmapsqsize);
+
+    tex = new CBFGroundTextures(map);
+
+    if (!textureDir.empty()) {
+        int n = browser.LoadDirectory(textureDir);
+        printf("Loaded %d textures from %s\n", n, textureDir.c_str());
+    }
+
+    // Initial camera: look at the centre of the map.
+    pivx = map->width * 8.0 / 1024.0;
+    pivy = 0.0f;
+    pivz = map->height * 8.0 / 1024.0;
+    camDist = 20.0f;
+
+    printf("Entering main loop\n");
+
+    SDL_SetWindowRelativeMouseMode(Main->screen, true);
+    signal(SIGINT, handle_interrupt);
+    signal(SIGTERM, handle_interrupt);
+
+    bool prevUndoKey = false;
+    bool painting = false;
+    int poly = 0;
+
+    while (quite == false && !Main->quit && !interrupt_requested)
+    {
+        Main->clearscreen(0.5, 0.5, 0.5, 1.0);
+        glLoadIdentity();
+
+        Main->PushTransform(0, 0, 0, 90.0, 0, 0);
+        Main->ExtractFrustum();
+        glBegin(GL_QUADS);
+        glVertex3f(0.0, 0.0, 0.01);
+        glVertex3f(map->width * 8 / 1024 * 2, 0.0, 0.0);
+        glVertex3f(map->width * 8 / 1024 * 2, map->height * 8 / 1024 * 2, 0);
+        glVertex3f(0.0, map->height * 8 / 1024 * 2, 0);
+        glEnd();
         Main->PopTransform();
 
-        Main->PushTransform((float)mx,0,(float)mz,0,0,0);
-        glPolygonMode(GL_FRONT,GL_LINE);
-        glPolygonMode(GL_BACK,GL_LINE);
-        glBegin(GL_POLYGON);
-        glColor3f(Main->getkey(SDL_SCANCODE_S) ? 0.0 : 1.0,Main->getkey(SDL_SCANCODE_S) ? 1.0 : 0.0,0.0);
-        mappx = mx*1024/2;
-        mappy = mz*1024/2;
-        int hmapx = mappx/8;
-        int hmapy = mappy/8;
-        int mmapx = mappx/8;
-        int mmapy = mappy/8;
+        Main->Make2DPositionInto3DPosition((float)Main->mousex, (float)Main->mousey, &mx, &my, &mz);
 
-        for (int k = 0; k < 360; k += 360/64)
+        if (Main->getkey(SDL_SCANCODE_ESCAPE))
+            quite = true;
+
+        // --- undo / redo ---
+        bool undoKey = Main->getkey(SDL_SCANCODE_Z) && (Main->getkey(SDL_SCANCODE_LCTRL) || Main->getkey(SDL_SCANCODE_RCTRL));
+        if (undoKey && !prevUndoKey)
         {
-            float xx1 = sin((float)k/360.0*2*3.141592653)*brushsize;
-            float yy1 = cos((float)k/360.0*2*3.141592653)*brushsize;
-            glVertex3f(xx1,-(GetH(map,hmapx+xx1*1024/8/2,hmapy+yy1*1024/8/2)+0.1),yy1);
-
+            commitStroke();
+            if (Main->getkey(SDL_SCANCODE_LSHIFT) || Main->getkey(SDL_SCANCODE_RSHIFT))
+                doRedo();
+            else
+                doUndo();
         }
-        glColor4f(0,1.0,1.0,0.2);
-        glEnd();
-        glPolygonMode(GL_FRONT,GL_LINE);
-        glPolygonMode(GL_BACK,GL_FILL);
-        glEnable(GL_BLEND);
-        glDisable(GL_DEPTH_TEST);
-        glBegin(GL_POLYGON);
-        for (int k = 0; k < 360; k += 360/64)
-        {
-            float xx1 = sin((float)k/360.0*2*3.141592653)*brushsize;
-            float yy1 = cos((float)k/360.0*2*3.141592653)*brushsize;
-            glVertex3f(xx1,-(GetH(map,hmapx+xx1*1024/8/2,hmapy+yy1*1024/8/2)+0.1),yy1);
+        prevUndoKey = undoKey;
 
-        }
-        glEnd();
-        glDisable(GL_BLEND);
-        glEnable(GL_DEPTH_TEST);
-        glPolygonMode(GL_FRONT,GL_FILL);
-        Main->PopTransform();
-        glColor4f(1,1.0,1.0,1.0);
-        glEnable(GL_LIGHTING);
-       /* Main->PushTransform((float)mx,0,(float)mz,0,0,0);
-        glBegin(GL_POLYGON);
-        glColor3f(1.0,1.0,0.0);
-        for (int k = 0; k < 360; k += 360/16)
-        {
-
-            glVertex3f(sin((float)k/360.0*2*3.141592653)*brushsize,0,cos((float)k/360.0*2*3.141592653)*brushsize);
-
-        }
-        glColor3f(1.0,1.0,1.0);
-        glEnd();
-
-        Main->PopTransform();*/
-
-	if (Main->getwup())
-	{
-	  if (mode == 0)
-            {
-            int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-			float cv2;
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-			    {
-				cv2 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay);
-				
-                                SetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay,cv2+0.1);
-			    }
-			    }
-			}
-		}
-	    }
-	    }else if ( mode == 1)
-    {
-
-        int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-			float cv2;
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-			    {
-				cv2 = GetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay);
-                                SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,cv2+0.1);
-			    }
-			    }
-			}
-		}
-	    }
-	}
-	}
-	if (Main->getwdown())
-	{
-	  if (mode == 0)
-            {
-            int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-			float cv2;
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-			    {
-				cv2 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay);
-				
-                                SetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay,cv2-0.1);
-			    }
-			    }
-			}
-		}
-	    }
-	    }else if ( mode == 1)
-    {
-
-        int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-			float cv2;
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-			    {
-				cv2 = GetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay);
-                                SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,cv2-0.1);
-			    }
-			    }
-			}
-		}
-	    }
-	}
-	}
-
+        // --- camera ---
         if (Main->mouseright)
         {
-
-            if (mode == 0)
+            if (!orbiting)
             {
-            int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (hmapx-reald/2+ax <= gs->mapx+1 && hmapy-reald/2+ay <= gs->mapy+1)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-                                SetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay,hval);
-                            else
-                            {
-                                //rat = -((float)reald/2 - cr)/(reald/2);
-                                p2 = GetH(map,hmapx-reald/2+ax+1,hmapy-reald/2+ay);
-                                p3 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay+1);
-                                p1 = GetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay-1);
-                                p0 = GetH(map,hmapx-reald/2+ax-1,hmapy-reald/2+ay);
-                                cmod = (p0 + p1 + p2 + p3) / 4;
-                                SetH(map,hmapx-reald/2+ax,hmapy-reald/2+ay,cmod);
-                            }
-
-                    }
-                    }
-                }
-
+                pivx = (float)mx;
+                pivy = (float)my;
+                pivz = (float)mz;
+                orbiting = true;
             }
-
-        }else if ( mode == 1)
-    {
-
-        int reald = brushsize * 1024/8;
-            float rat = 0.0;
-
-            for ( int ay = 0; ay < reald; ay++)
-            {
-                for ( int ax = 0; ax < reald; ax++)
-                {
-
-                        int bx = reald/2;
-                        int by = reald/2;
-
-                        float cr = sqrt((float)((ax-bx)*(ax-bx)+(ay-by)*(ay-by)));
-                       // printf("%f <= %f\n", cr,(float)reald/2);
-                        if ( cr <= (float)reald/2 )
-                        {
-                            if (mmapx-reald/2+ax <= map->header.mapx && hmapy-reald/2+ay <= map->header.mapy)
-                            {
-                           // printf("Seth\n");
-                            if ( not Main->getkey(SDL_SCANCODE_S) ) // Smooth
-                                SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,hval);
-                            else
-                            {
-                                //rat = -((float)reald/2 - cr)/(reald/2);
-                                p2 = GetM(map,(mmapx-reald/2+ax-2),(mmapy-reald/2+ay-2));
-                                p3 = GetM(map,(mmapx-reald/2+ax+1),(mmapy-reald/2+ay-2));
-                                p1 = GetM(map,(mmapx-reald/2+ax+1),(mmapy-reald/2+ay+1));
-                                p0 = GetM(map,(mmapx-reald/2+ax-2),(mmapy-reald/2+ay+1));
-
-                                cmod = (p0 + p1 + p2 + p3) / 4;
-                               // printf("p0=%f,p1=%f,p2=%f,p3=%f,cmod=%f\n",p0,p1,p2,p3,cmod);
-                                SetM(map,mmapx-reald/2+ax,mmapy-reald/2+ay,cmod);
-                            }
-
-                    }
-                    }
-                }
-
-            }
-
-
-
-
-    }
+            camRotY += (float)Main->mouserelx / 8.0;
+            camRotZ += (float)Main->mouserely / 8.0;
+            SDL_HideCursor();
+        }
+        else
+        {
+            orbiting = false;
+            SDL_ShowCursor();
         }
 
-        lastmr = Main->mouseright;
-		//usleep(8000);
-		//SDL_WarpMouse(Main->width / 2, Main->height /2); Fail
-		 cval = GetH(map,hmapx,hmapy);
-        memset(txt,0x0,1024);
-       // printf("%i\n",(int)time(NULL));
-        /*if ( Main->getfps() > 60  and ts > 3.0 and time(NULL) - lastchange > 1){
+        // The camera distance lives in main.cc, so zoom there and let
+        // SetCamera() clamp it every frame.
+        if (Main->getwup())
+            camDist *= 0.85f;
+        if (Main->getwdown())
+            camDist *= 1.18f;
+        if (Main->getkey(SDL_SCANCODE_Q))
+            camDist *= 0.97f;
+        if (Main->getkey(SDL_SCANCODE_E))
+            camDist *= 1.03f;
+        camDist = std::max(0.2f, std::min(500.0f, camDist));
+
+        float pan = 20.0f / std::max(1.0, (double)Main->getfps());
+        if (Main->up)
+            pivx += pan;
+        if (Main->down)
+            pivx -= pan;
+        if (Main->left)
+            pivz += pan;
+        if (Main->right)
+            pivz -= pan;
+
+        // --- brush ---
+        if (Main->getkey(SDL_SCANCODE_A) && brushsize < 100)
+            brushsize += 5 / std::max(1.0, (double)Main->getfps());
+        if (Main->getkey(SDL_SCANCODE_Z) && !Main->getkey(SDL_SCANCODE_LCTRL) && brushsize > 0)
+            brushsize -= 5 / std::max(1.0, (double)Main->getfps());
+        if (Main->getkey(SDL_SCANCODE_C))
+            hval += 5 / std::max(1.0, (double)Main->getfps());
+        if (Main->getkey(SDL_SCANCODE_X))
+            hval -= 5 / std::max(1.0, (double)Main->getfps());
+        if (Main->getkey(SDL_SCANCODE_B))
+            hval = (float)cval;
+        if (Main->getkey(SDL_SCANCODE_MINUS))
+            falloff = std::max(0.2f, falloff - 0.2f);
+        if (Main->getkey(SDL_SCANCODE_EQUALS))
+            falloff = std::min(4.0f, falloff + 0.2f);
+
+        if (Main->getkey(SDL_SCANCODE_T) && ts > 4)
             ts -= 1;
-            for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-                landscapecachestatus[i] = 'u';
-            lastchange = time(NULL);
-        }
-        if ( Main->getfps() < 20  and ts < 10.0 and time(NULL) - lastchange > 1){
+        if (Main->getkey(SDL_SCANCODE_Y) && ts < 10)
             ts += 1;
-            for ( int i = 0; i < map->height*8/1024*map->width*8/1024; i++)
-                landscapecachestatus[i] = 'u';
-            lastchange = time(NULL);
-        }*/
-		sprintf(txt,"%f FPS XPosition = %f,YPosition = %f,ZPosition = %f,RotX= %f,RotY= %f,RotZ = %f %i Polygons",Main->getfps(),pxx,pyy,pzz,rxx,ryy,rzz,poly);
-		if (haveFont)
-		{
-			font.Render(txt);
-		}
-		poly = 0;
 
-		sprintf(txt,"Brushsize: %f , MAPX = %f , MAPY = %f, Height = %f , Set height = %f",brushsize,mappx,mappy,cval,hval);
-		if (haveFont)
-		{
-			font.Render(txt,-1,FTPoint(0,20));
-		}
-		sprintf(txt,"Cache status = %s",landscapecachestatus);
-		if (haveFont)
-		{
-			font.Render(txt,-1,FTPoint(0,40));
-		}
-		Main->display();
-	}
-	
-	SDL_SetWindowRelativeMouseMode(Main->screen, false);
-	Main->Terminate();
-	bool save = false;
-	
-	while ( true )
-	{
+        int newMode = mode;
+        if (Main->getkey(SDL_SCANCODE_0))
+            newMode = MODE_HEIGHT;
+        if (Main->getkey(SDL_SCANCODE_1))
+            newMode = MODE_METAL;
+        if (Main->getkey(SDL_SCANCODE_2))
+            newMode = MODE_PAINT;
+        if (Main->getkey(SDL_SCANCODE_3))
+            newMode = MODE_COLOUR;
+        if (newMode != mode)
+        {
+            commitStroke();
+            mode = newMode;
+            printf("mode -> %s\n", modeNames[mode]);
+            for (int i = 0; i < totalSquares; ++i)
+                landscapecachestatus[i] = 'u';
+        }
+
+        static bool prevP = false;
+        bool pDown = Main->getkey(SDL_SCANCODE_P);
+        if (pDown && !prevP)
+            brushShape = (brushShape + 1) % 3;
+        prevP = pDown;
+
+        if (Main->getkey(SDL_SCANCODE_L))
+        {
+            if (mode == MODE_METAL)
+                glDrawPixels(mbi.width, mbi.height, GL_LUMINANCE, GL_UNSIGNED_BYTE, metalmap);
+            else
+                glDrawPixels(gs->mapx + 1, gs->mapy + 1, GL_LUMINANCE, GL_FLOAT, map->heightmap);
+        }
+
+        if (Main->getkey(SDL_SCANCODE_W))
+        {
+            glPolygonMode(GL_FRONT, GL_LINE);
+            glPolygonMode(GL_BACK, GL_LINE);
+        }
+        else
+        {
+            glPolygonMode(GL_FRONT, GL_FILL);
+            glPolygonMode(GL_BACK, GL_FILL);
+        }
+
+        if (Main->getkey(SDL_SCANCODE_F))
+            Main->ToggleFullScreen();
+
+        static bool prevG = false;
+        bool gDown = Main->getkey(SDL_SCANCODE_G);
+        if (gDown && !prevG)
+            browserVisible = !browserVisible;
+        prevG = gDown;
+
+        int selectedBefore = browser.selected;
+        if (Main->getkey(SDL_SCANCODE_LEFTBRACKET))
+            browser.select(browser.selected - 1);
+        if (Main->getkey(SDL_SCANCODE_RIGHTBRACKET))
+            browser.select(browser.selected + 1);
+        if (Main->getkey(SDL_SCANCODE_COMMA))
+            paintScale = std::max(0.1f, paintScale * 0.9f);
+        if (Main->getkey(SDL_SCANCODE_PERIOD))
+            paintScale = std::min(64.0f, paintScale * 1.1f);
+
+        // Painting with the left mouse button, unless the click is on the
+        // texture browser.
+        int hit = browserHitTest();
+        if (hit >= 0)
+        {
+            static int lastHit = -1;
+            if (Main->mouseleft && lastHit != hit)
+                browser.select(hit);
+            lastHit = hit;
+        }
+        if (browser.selected != selectedBefore && !browser.empty())
+            printf("texture: %s\n", browser.current()->name.c_str());
+
+        Main->SetCamera(pivx, pivy, pivz, camRotX, camRotY, camRotZ, camDist);
+        l0.setpos(0.0f, -10.0f, 0.0f);
+
+        Main->PushTransform(0, 0, 0, 90.0, 0, 0);
+
+        for (int y_ = 0; y_ < bigSquaresY(); ++y_)
+            for (int x_ = 0; x_ < bigSquaresX(); ++x_)
+            {
+                groundshader.useshader();
+                drawsquare(x_, y_, map, tex, pow(2, ts));
+                glUseProgram(0);
+            }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+        glDisable(GL_LIGHTING);
+        glBegin(GL_QUADS);
+        glColor4f(0.0, 0.4, 1.0, 0.4);
+        glVertex3f(0.0, 0.0, 0.01);
+        glVertex3f(map->width * 8 / 1024 * 2, 0.0, 0.01);
+        glVertex3f(map->width * 8 / 1024 * 2, map->height * 8 / 1024 * 2, 0.01);
+        glVertex3f(0.0, map->height * 8 / 1024 * 2, 0.01);
+        glEnd();
+        glDisable(GL_BLEND);
+        glColor4f(1, 1, 1, 1);
+        Main->PopTransform();
+
+        if (Main->mouseleft && hit < 0)
+        {
+            if (!painting)
+            {
+                painting = true;
+                commitStroke();
+            }
+            applyBrush();
+        }
+        else if (painting)
+        {
+            painting = false;
+            commitStroke();
+        }
+
+        // Brush outline.
+        Main->PushTransform((float)mx, 0, (float)mz, 0, 0, 0);
+        glPolygonMode(GL_FRONT, GL_LINE);
+        glPolygonMode(GL_BACK, GL_LINE);
+        glColor3f(Main->getkey(SDL_SCANCODE_S) ? 0.0 : 1.0, Main->getkey(SDL_SCANCODE_S) ? 1.0 : 0.0, 0.0);
+
+        {
+            int r = (int)(brushsize * 64.0);
+            glBegin(GL_POLYGON);
+            for (int k = 0; k < 360; k += 360 / 64)
+            {
+                float xx1 = sin((float)k / 360.0 * 2 * 3.141592653) * brushsize;
+                float yy1 = cos((float)k / 360.0 * 2 * 3.141592653) * brushsize;
+                glVertex3f(xx1, -(GetH(map, (int)(mx * 64.0 + xx1 * 64.0), (int)(mz * 64.0 + yy1 * 64.0)) + 0.1), yy1);
+            }
+            glEnd();
+            glBegin(GL_POLYGON);
+            glColor4f(0, 1.0, 1.0, 0.2);
+            for (int k = 0; k < 360; k += 360 / 64)
+            {
+                float xx1 = sin((float)k / 360.0 * 2 * 3.141592653) * brushsize;
+                float yy1 = cos((float)k / 360.0 * 2 * 3.141592653) * brushsize;
+                glVertex3f(xx1, -(GetH(map, (int)(mx * 64.0 + xx1 * 64.0), (int)(mz * 64.0 + yy1 * 64.0)) + 0.1), yy1);
+            }
+            glEnd();
+            (void)r;
+        }
+
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+        glPolygonMode(GL_FRONT, GL_FILL);
+        Main->PopTransform();
+        glColor4f(1, 1.0, 1.0, 1.0);
+        glEnable(GL_LIGHTING);
+
+        cval = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0));
+        poly = 0;
+
+        drawOverlay(font, haveFont);
+
+        Main->display();
+    }
+
+    commitStroke();
+
+    SDL_SetWindowRelativeMouseMode(Main->screen, false);
+    Main->Terminate();
+
+    bool save = false;
+    while (true)
+    {
         printf("Save changes? [y/n] ");
         fflush(stdout);
         int ans = getchar();
@@ -1112,65 +1122,71 @@ Main->PushTransform(0,0,0,90.0,0,0);
             save = false;
             break;
         }
-	}
-	if ( save )
-	{
+    }
+
+    if (save)
+    {
         printf("Writing new maps to smf file...\n");
-        MapHeader maph;
-        FILE * mapfout = fopen(smffile,"rb+");
-        if ( ! mapfout )
+        SMFHeader maph;
+        FILE* mapfout = fopen(smffile, "rb+");
+        if (!mapfout)
         {
-        	printf("Error, cannot open the map file to save data\n");
-        	return 1;
+            printf("Error, cannot open the map file to save data\n");
+            return 1;
         }
-        if (fread(&maph,sizeof(maph),1,mapfout) != 1)
+        if (fread(&maph, sizeof(maph), 1, mapfout) != 1)
         {
-        	printf("Error, cannot read the map header\n");
-        	fclose(mapfout);
-        	return 1;
+            printf("Error, cannot read the map header\n");
+            fclose(mapfout);
+            return 1;
         }
-        printf("Header Magic: %s\n",maph.magic);
-        printf("metalmapPtr: %i      MAPX=%i    MAPY=%i\n",maph.metalmapPtr,maph.mapx,maph.mapy);
-        printf("typemapPtr: %i      MAPX=%i    MAPY=%i\n",maph.typeMapPtr,maph.mapx,maph.mapy);
-        printf("heightmapPtr: %i      MAPX=%i    MAPY=%i\n",maph.heightmapPtr,maph.mapx,maph.mapy);
-        printf("minimapPtr: %i      MAPX=%i    MAPY=%i\n",maph.minimapPtr,maph.mapx,maph.mapy);
+        printf("Header Magic: %s\n", maph.magic);
+        printf("metalmapPtr: %i      MAPX=%i    MAPY=%i\n", maph.metalmapPtr, maph.mapx, maph.mapy);
+        printf("typemapPtr: %i      MAPX=%i    MAPY=%i\n", maph.typeMapPtr, maph.mapx, maph.mapy);
+        printf("heightmapPtr: %i      MAPX=%i    MAPY=%i\n", maph.heightmapPtr, maph.mapx, maph.mapy);
+        printf("minimapPtr: %i      MAPX=%i    MAPY=%i\n", maph.minimapPtr, maph.mapx, maph.mapy);
 
-        unsigned int datasize = (maph.mapx+1)*(maph.mapy+1)*sizeof(unsigned short);
-        printf("(%i+1)*(%i+1)*%i=%i\n",maph.mapx,maph.mapy,(int)sizeof(unsigned short),datasize);
-        unsigned short *hmapdata = (unsigned short*)malloc(datasize);
+        size_t datasize = (size_t)(maph.mapx + 1) * (maph.mapy + 1) * sizeof(unsigned short);
+        printf("(%i+1)*(%i+1)*%zu=%zu\n", maph.mapx, maph.mapy, sizeof(unsigned short), datasize);
+        std::vector<unsigned short> hmapdata(datasize);
         printf("Converting height map...\n");
-        for ( y = 0; y < maph.mapy+1;y++)
-        {
-            for ( x = 0; x < maph.mapx+1;x++)
-            {
-                double h = max(0.0, min(1.0, (double)map->heightmap[y*(maph.mapx+1)+x]));
-                hmapdata[y*(maph.mapx+1)+x] = (unsigned short)min(65535.0, 65536.0*h);
-            }
-        }
+        for (int y = 0; y < maph.mapy + 1; ++y)
+            for (int x = 0; x < maph.mapx + 1; ++x)
+                hmapdata[y * (maph.mapx + 1) + x] =
+                    (unsigned short)std::min(65535.0, 65536.0 * std::max(0.0, std::min(1.0, (double)map->heightmap[y * (maph.mapx + 1) + x])));
         printf("Done converting heightmap\n");
-        fseek(mapfout,maph.heightmapPtr,SEEK_SET);
-        fwrite(hmapdata,datasize,1,mapfout);
-        fseek(mapfout,maph.metalmapPtr,SEEK_SET);
-        fwrite(metalmap,map->width/2*map->height/2,1,mapfout);
+
+        fseek(mapfout, maph.heightmapPtr, SEEK_SET);
+        fwrite(hmapdata.data(), datasize, 1, mapfout);
+        fseek(mapfout, maph.metalmapPtr, SEEK_SET);
+        fwrite(metalmap, 1, (size_t)(map->width / 2) * (map->height / 2), mapfout);
         fclose(mapfout);
-        free(hmapdata);
+
+        if (tex->bakePaint())
+        {
+            printf("Compressing painted tiles...\n");
+            if (tex->writeTileFiles(smffile))
+                printf("Tile file updated (%d tiles)\n", tex->numTiles());
+        }
+
         printf("Save complete\n");
-	}
+    }
 
-	int squares = map->height * 8 / 1024 * map->width * 8 / 1024;
-	glDeleteTextures(squares, metaltexture);
-	glDeleteLists(landscapecache[0], squares);
-	free(metaltexture);
-	free(landscapecache);
-	free(tmpdata);
-	map->FreeInfoMap("metal", metalmap);
-	free(landscapecachestatus);
-	delete tex;
-	delete map;
-	delete Main;
-	delete gs;
-	printf("Exiting\n");
-   
-	return 0;
+    glDeleteTextures(totalSquares, metaltexture);
+    glDeleteLists(landscapecache[0], totalSquares);
+    glDeleteTextures(1, &emptyTexture);
+    free(metaltexture);
+    free(landscapecache);
+    free(tmpdata);
+    if (metalmap)
+        map->FreeInfoMap("metal", metalmap);
+    free(landscapecachestatus);
+
+    delete tex;
+    delete map;
+    delete Main;
+    delete gs;
+
+    printf("Exiting\n");
+    return 0;
 }
-
