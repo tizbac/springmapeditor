@@ -111,7 +111,8 @@ static float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
 static bool orbiting = false;
 
 // brush
-static int detail = 6;
+static int detail = 5; // lower is a finer mesh
+static std::vector<int> terrainLods;
 static float brushsize = 1.0f; // 1.0 = 64 map squares radius
 static float hval = 0.0f;      // height/metal value the brush applies
 static float falloff = 1.0f;   // 1 = hard edge, 3 = very soft
@@ -672,6 +673,28 @@ static std::string parentDirectory(const std::string &dir)
 	return parent;
 }
 
+// Recomputes the per square level of detail from how large the squares are on
+// screen. The mesh is rebuilt only when a level actually changed, and at most a
+// few times per second so a continuous zoom does not stall the editor.
+static void refreshTerrainLods(bool force)
+{
+	if (!terrain.built() || !map || terrainLods.empty())
+		return;
+
+	static unsigned lastTick = 0;
+	unsigned now = SDL_GetTicks();
+	if (!force && now - lastTick < 150)
+		return;
+	lastTick = now;
+
+	std::vector<int> next = terrainLods;
+	if (terrain.updateLods(Main->vp, Main->width, Main->height - Main->barHeight, detail - 6, next))
+	{
+		terrainLods = next;
+		terrain.build(map, tex, terrainLods);
+	}
+}
+
 static void loadMap(const std::string &path)
 {
 	commitStroke();
@@ -724,7 +747,8 @@ static void loadMap(const std::string &path)
 	}
 	rebuildMetalTexture();
 
-	terrain.build(map, tex, detail);
+	terrainLods.assign((size_t)bigSquaresX() * bigSquaresY(), 6);
+	terrain.build(map, tex, terrainLods);
 
 	camRotX = 55.0f;
 	camRotY = 20.0f;
@@ -1474,12 +1498,12 @@ int main(int argc, char **argv)
 		if (Main->getkeydown(SDL_SCANCODE_T) && detail > 4)
 		{
 			detail -= 1;
-			terrain.build(map, tex, detail);
+			refreshTerrainLods(true);
 		}
 		if (Main->getkeydown(SDL_SCANCODE_Y) && detail < 10)
 		{
 			detail += 1;
-			terrain.build(map, tex, detail);
+			refreshTerrainLods(true);
 		}
 
 		int newMode = mode;
@@ -1598,6 +1622,7 @@ int main(int argc, char **argv)
 		}
 
 		// --- draw ---
+		refreshTerrainLods(false);
 		terrain.flushDirty();
 		Main->camrx = camRotX;
 		Main->camry = camRotY;

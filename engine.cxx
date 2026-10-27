@@ -280,7 +280,12 @@ void engine::updateCamera()
 	float aspect = (float)this->width /
 	               (float)(this->height - this->barHeight > 0 ? this->height - this->barHeight : 1);
 
-	projection = Mat4::perspective(60.0f, aspect, 0.1f, 2000.0f);
+	// The depth range follows the orbit distance: a fixed near plane close to
+	// the eye and a far plane far beyond the map keeps the terrain from being
+	// clipped at any zoom level without wasting depth precision.
+	float nearPlane = std::max(0.05f, camdist * 0.02f);
+	float farPlane = std::max(800.0f, camdist * 40.0f);
+	projection = Mat4::perspective(60.0f, aspect, nearPlane, farPlane);
 
 	Mat4 rotation = Mat4::multiply(Mat4::rotateDeg(camrx, 1.0f, 0.0f, 0.0f),
 	                               Mat4::multiply(Mat4::rotateDeg(camry, 0.0f, 1.0f, 0.0f),
@@ -318,7 +323,7 @@ void engine::updateCamera()
 		{
 			float sum = 0.0f;
 			for (int k = 0; k < 4; ++k)
-				sum += vp.m[k * 4 + i] * clipPlanes[p][k];
+				sum += vp.m[i * 4 + k] * clipPlanes[p][k];
 			frustum[p][i] = -sum;
 		}
 	}

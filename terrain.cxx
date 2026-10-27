@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "Map/GlobalStuff.h"
 #include "Map/SMF/BFGroundTextures.h"
@@ -51,7 +52,8 @@ static bool boxInView(const float frustum[6][4], float x0, float y0, float z0, f
 			if (d > best)
 				best = d;
 		}
-		if (best <= 0.0f)
+		// A small epsilon so a square that just touches a plane is kept.
+		if (best <= -0.01f)
 			return false;
 	}
 	return true;
@@ -81,12 +83,14 @@ bool Terrain::init()
 	return true;
 }
 
-void Terrain::buildSquare(int bx, int by, std::vector<float> &out)
+void Terrain::buildSquare(int bx, int by, int lod, std::vector<float> &out)
 {
-	int sqsize = quadsPerSquare;
+	int sqsize = 1024 >> lod;
+	if (sqsize < 1)
+		sqsize = 1;
+
 	const float quadWidth = 2.0f / (float)sqsize;
-	double tilesize = pow(2.0, (double)detail);
-	const int step = (int)(tilesize / 8.0) < 1 ? 1 : (int)(tilesize / 8.0);
+	const int step = 128 / sqsize < 1 ? 1 : 128 / sqsize;
 
 	for (int Y = 0; Y < sqsize; ++Y)
 	{
@@ -136,17 +140,11 @@ void Terrain::buildSquare(int bx, int by, std::vector<float> &out)
 	}
 }
 
-void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures, int detail_)
+void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures, const std::vector<int> &lod)
 {
 	map = map_;
-	detail = detail_;
 	bigX = textures->numBigSquaresX();
 	bigY = textures->numBigSquaresY();
-
-	int sqsize = (int)(1024.0 / pow(2.0, (double)detail));
-	if (sqsize < 1)
-		sqsize = 1;
-	quadsPerSquare = sqsize;
 
 	vertices.clear();
 	squares.clear();
@@ -158,26 +156,30 @@ void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures, int detail_)
 	{
 		for (int bx = 0; bx < bigX; ++bx)
 		{
+			size_t i = (size_t)by * bigX + bx;
+			int level = lod.size() > i ? lod[i] : 6;
+
 			square.clear();
-			buildSquare(bx, by, square);
+			buildSquare(bx, by, level, square);
 
 			BigSquare sq;
 			sq.first = (int)(vertices.size() / 8);
 			sq.count = (int)(square.size() / 8);
+			sq.lod = level;
 			sq.cx0 = (float)(bx * 2);
 			sq.cz0 = (float)(by * 2);
 			sq.cx1 = (float)(bx * 2 + 2);
 			sq.cz1 = (float)(by * 2 + 2);
-			sq.cy0 = -20.0f;
+			sq.cy0 = 0.0f;
 			sq.cy1 = 0.0f;
 
 			// Widen the bounding box with the actual heights of the square.
-			for (size_t i = 0; i < square.size(); i += 8)
+			for (size_t k = 0; k < square.size(); k += 8)
 			{
-				if (square[i + 1] < sq.cy0)
-					sq.cy0 = square[i + 1];
-				if (square[i + 1] > sq.cy1)
-					sq.cy1 = square[i + 1];
+				if (square[k + 1] < sq.cy0)
+					sq.cy0 = square[k + 1];
+				if (square[k + 1] > sq.cy1)
+					sq.cy1 = square[k + 1];
 			}
 
 			vertices.insert(vertices.end(), square.begin(), square.end());
@@ -185,12 +187,68 @@ void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures, int detail_)
 		}
 	}
 
-	printf("Terrain mesh: %dx%d big squares, %d quads/square, %d vertices\n", bigX, bigY,
-	       quadsPerSquare, (int)(vertices.size() / 8));
-
 	glBindBuffer(GL_ARRAY_BUFFER, vbo);
 	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)vertices.size() * sizeof(float), vertices.data(),
 	             GL_STATIC_DRAW);
+}
+
+int Terrain::lodOf(int bx, int by) const
+{
+	if (bx < 0 || by < 0 || bx >= bigX || by >= bigY)
+		return 6;
+	return squares[(size_t)by * bigX + bx].lod;
+}
+
+bool Terrain::updateLods(const Mat4 &vp, int viewportWidth, int viewportHeight, int bias,
+                         std::vector<int> &lod)
+{
+	if (squares.empty() || viewportWidth < 1 || viewportHeight < 1)
+		return false;
+
+	(void)viewportHeight;
+	bool changed = false;
+	lod.resize(squares.size());
+
+	for (int by = 0; by < bigY; ++by)
+	{
+		for (int bx = 0; bx < bigX; ++bx)
+		{
+			// Project the centre of the square and the centre two units away and
+			// turn the difference into pixels: this is the size the square has on
+			// screen, which is what the level of detail should follow.
+			float cx = bx * 2.0f + 1.0f;
+			float cz = by * 2.0f + 1.0f;
+			int level = 10;
+
+			float w0 = vp.m[11] * cz + vp.m[15] + vp.m[3] * cx;
+			float w1 = vp.m[11] * cz + vp.m[15] + vp.m[3] * (cx + 2.0f);
+			if (w0 > 1e-4f && w1 > 1e-4f)
+			{
+				float x0 = (vp.m[0] * cx + vp.m[8] * cz + vp.m[12]) / w0;
+				float x1 = (vp.m[0] * (cx + 2.0f) + vp.m[8] * cz + vp.m[12]) / w1;
+				float pixels = std::fabs(x1 - x0) * 0.5f * (float)viewportWidth;
+				if (pixels > 1.0f)
+				{
+					// One quad should end up roughly 16 pixels wide: a big square
+					// has 1024 / 2^level quads per side.
+					float levelF = 14.0f - std::log2(pixels);
+					level = (int)std::floor(levelF) + bias;
+				}
+			}
+
+			if (level < 4)
+				level = 4;
+			if (level > 10)
+				level = 10;
+
+			size_t i = (size_t)by * bigX + bx;
+			lod[i] = level;
+			if (level != squares[i].lod)
+				changed = true;
+		}
+	}
+
+	return changed;
 }
 
 void Terrain::markDirty(int bx, int by)
@@ -220,7 +278,7 @@ void Terrain::flushDirty()
 		int by = (int)(i / (size_t)bigX);
 
 		square.clear();
-		buildSquare(bx, by, square);
+		buildSquare(bx, by, squares[i].lod, square);
 
 		BigSquare &sq = squares[i];
 		size_t offset = (size_t)sq.first * 8 * sizeof(float);
@@ -231,7 +289,7 @@ void Terrain::flushDirty()
 		for (size_t k = 0; k < square.size(); ++k)
 			vertices[(size_t)sq.first * 8 + k] = square[k];
 
-		sq.cy0 = -20.0f;
+		sq.cy0 = 0.0f;
 		sq.cy1 = 0.0f;
 		for (size_t k = 0; k < square.size(); k += 8)
 		{

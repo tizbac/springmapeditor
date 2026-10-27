@@ -83,6 +83,7 @@ The same list is printed on screen while the editor runs (toggle it with `Help`)
 | --- | --- |
 | Left mouse drag | Apply the brush |
 | Right mouse drag | Orbit the camera around the point under the cursor |
+| Middle mouse drag | Pan the camera, keeping the grabbed map point under the cursor |
 | Mouse wheel, `Q` / `E` | Zoom in / out |
 | Arrow keys | Pan the camera |
 | `A` / `Z` | Larger / smaller brush |
@@ -92,7 +93,7 @@ The same list is printed on screen while the editor runs (toggle it with `Help`)
 | `P` | Cycle the brush shape (circle, square, triangle) |
 | `-` / `=` | Less / more brush falloff |
 | `0` – `3` | Mode: height, metal, texture, colour |
-| `T` / `Y` | Texture detail (which mip level is drawn) |
+| `T` / `Y` | Terrain detail offset (finer / coarser mesh) |
 | `[` / `]` | Previous / next texture |
 | `,` / `.` | Texture paint scale |
 | `R` | Drag-rectangle fill |
@@ -124,6 +125,16 @@ affected tiles are decoded, blended with the paint layer and re-encoded as DXT1
 with all four mip levels, deduplicated against the tiles already in the file and
 appended to the last tile file. The tile map inside the `.smf` and the tile
 counts in its header are rewritten to match. The minimap is not regenerated.
+
+## Rendering
+
+The terrain mesh is split per big square and every square picks its own level of
+detail from how large it is on screen (about 16 pixels per quad), so zooming in
+refines the squares under the camera and zooming out keeps the far ones cheap.
+`T` / `Y` shift that choice up and down. Squares are culled against the view
+frustum only; there is no distance based cut-off. The ground textures are
+uploaded with the four mip levels stored in the tile file and filtered with
+`GL_LINEAR_MIPMAP_LINEAR`.
 
 ## Notes
 
