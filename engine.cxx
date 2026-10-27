@@ -145,6 +145,16 @@ bool engine::getkeydown(SDL_Scancode key)
 	return false;
 }
 
+bool engine::getmouserightdown()
+{
+	if (this->mouserightdown)
+	{
+		this->mouserightdown = false;
+		return true;
+	}
+	return false;
+}
+
 bool engine::getmousedown()
 {
 	if (this->mousedown)

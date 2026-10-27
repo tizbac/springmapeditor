@@ -50,7 +50,7 @@
 #include <archive_entry.h>
 
 enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
-enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3 };
+enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3, MODE_START = 4 };
 enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2, PICK_PROJECT = 3, PICK_MAPTEX = 4 };
 
 // Modal dialogs.
@@ -85,6 +85,7 @@ enum Action {
 	ACT_MODE_METAL,
 	ACT_MODE_TEXTURE,
 	ACT_MODE_COLOUR,
+	ACT_MODE_START,
 	ACT_RECT_FILL,
 	ACT_HELP,
 	ACT_DEBUG,
@@ -168,7 +169,7 @@ static std::string pendingTexturePath;
 static std::string dialogSizeText = "1024x1024";
 static const int kMenuHeight = 24;
 
-static const char *modeNames[] = {"height", "metal", "texture", "colour"};
+static const char *modeNames[] = {"height", "metal", "texture", "colour", "startpos"};
 static const char *shapeNames[] = {"circle", "square", "triangle"};
 
 static engine *Main = nullptr;
@@ -228,6 +229,8 @@ static bool painting = false;
 
 static bool paletteVisible = false;
 static bool mapSettingsVisible = false;
+// Start positions in the map's own coordinates (elmos), as stored in the .smd.
+static std::vector<std::pair<float, float>> startPositions;
 
 // Height range of the map (the SMF header's minHeight/maxHeight) and the water
 // settings from the map info file. Water is at y = waterHeight in the editor;
@@ -515,6 +518,98 @@ static double brushWeight(double dx, double dy, double r)
 	if (d >= 1.0)
 		return 0.0;
 	return pow(1.0 - d, falloff);
+}
+
+// Start positions are stored in elmos, like the .smd does.
+static const float kElmosPerUnitSP = 512.0f;
+
+static void addStartPosition(double worldX, double worldZ)
+{
+	float x = (float)(worldX * kElmosPerUnitSP);
+	float z = (float)(worldZ * kElmosPerUnitSP);
+
+	// Ignore a click that lands on top of an existing start position.
+	for (size_t i = 0; i < startPositions.size(); ++i)
+	{
+		float dx = startPositions[i].first - x;
+		float dz = startPositions[i].second - z;
+		if (dx * dx + dz * dz < 200.0f * 200.0f)
+			return;
+	}
+
+	startPositions.push_back(std::make_pair(x, z));
+	dirty = true;
+	printf("Start position %d at %.0f,%.0f\n", (int)startPositions.size(), x, z);
+}
+
+static bool removeStartPosition(double worldX, double worldZ)
+{
+	float x = (float)(worldX * kElmosPerUnitSP);
+	float z = (float)(worldZ * kElmosPerUnitSP);
+
+	int best = -1;
+	float bestDist = 600.0f * 600.0f; // elmos, squared
+	for (size_t i = 0; i < startPositions.size(); ++i)
+	{
+		float dx = startPositions[i].first - x;
+		float dz = startPositions[i].second - z;
+		float d = dx * dx + dz * dz;
+		if (d < bestDist)
+		{
+			bestDist = d;
+			best = (int)i;
+		}
+	}
+	if (best < 0)
+		return false;
+
+	startPositions.erase(startPositions.begin() + best);
+	dirty = true;
+	return true;
+}
+
+// Draws a downward arrow at every start position. Depth test is off so they are
+// always visible, whatever the terrain does.
+static void drawStartPositions()
+{
+	if (startPositions.empty())
+		return;
+
+	float size = std::max(0.5f, camDist * 0.05f);
+	float r = size * 0.30f;
+	float shaft = size * 0.9f;
+
+	glDisable(GL_DEPTH_TEST);
+	ui.begin();
+	for (size_t i = 0; i < startPositions.size(); ++i)
+	{
+		float wx = startPositions[i].first / kElmosPerUnitSP;
+		float wz = startPositions[i].second / kElmosPerUnitSP;
+		float wy = GetHWorld((int)(wx * 64.0), (int)(wz * 64.0));
+
+		float top = wy + size;
+		float tip = wy;
+
+		// Four sides of the cone.
+		float cx[4] = {r, 0.0f, -r, 0.0f};
+		float cz[4] = {0.0f, r, 0.0f, -r};
+		for (int k = 0; k < 4; ++k)
+		{
+			int n = (k + 1) % 4;
+			ui.quad3(wx + cx[k], top, wz + cz[k], wx + cx[n], top, wz + cz[n], wx, tip, wz, wx, tip,
+			         wz, 1.0f, 0.45f, 0.1f, 0.9f);
+		}
+
+		// Base plate and the shaft above it.
+		ui.quad3(wx + cx[0], top, wz + cz[0], wx + cx[1], top, wz + cz[1], wx + cx[2], top,
+		         wz + cz[2], wx + cx[3], top, wz + cz[3], 1.0f, 0.55f, 0.15f, 0.55f);
+		ui.quad3(wx - r * 0.25f, top, wz, wx + r * 0.25f, top, wz, wx + r * 0.25f, top + shaft, wz,
+		         wx - r * 0.25f, top + shaft, wz, 1.0f, 0.5f, 0.12f, 0.9f);
+		ui.quad3(wx, top, wz - r * 0.25f, wx, top, wz + r * 0.25f, wx, top + shaft, wz + r * 0.25f,
+		         wx, top + shaft, wz - r * 0.25f, 1.0f, 0.5f, 0.12f, 0.9f);
+	}
+	ui.flush(Main->vp, 0);
+	glEnable(GL_DEPTH_TEST);
 }
 
 // Paints one map square with the current mode and value, weighted by w.
@@ -821,10 +916,20 @@ static void paintStrokeSegment()
 
 static void fillRectangle(double ax, double az, double bx, double bz)
 {
-	int x0 = (int)std::min(ax, bx) * 64;
-	int x1 = (int)std::max(ax, bx) * 64;
-	int y0 = (int)std::min(az, bz) * 64;
-	int y1 = (int)std::max(az, bz) * 64;
+	if (!std::isfinite(ax) || !std::isfinite(az) || !std::isfinite(bx) || !std::isfinite(bz))
+		return;
+
+	// Clip the rectangle to the map: dragging outside it must not walk millions
+	// of squares (or index anything out of bounds).
+	double lo = std::min(ax, bx) * 64.0, hi = std::max(ax, bx) * 64.0;
+	double loZ = std::min(az, bz) * 64.0, hiZ = std::max(az, bz) * 64.0;
+	if (hi < 0.0 || lo > (double)gs->mapx || hiZ < 0.0 || loZ > (double)gs->mapy)
+		return;
+
+	int x0 = (int)std::max(0.0, std::min((double)gs->mapx, lo));
+	int x1 = (int)std::max(0.0, std::min((double)gs->mapx, hi));
+	int y0 = (int)std::max(0.0, std::min((double)gs->mapy, loZ));
+	int y1 = (int)std::max(0.0, std::min((double)gs->mapy, hiZ));
 
 	for (int y = y0; y <= y1; ++y)
 		for (int x = x0; x <= x1; ++x)
@@ -1208,6 +1313,26 @@ static void loadMapInfo()
 	infoValues[FIELD_MINWIND] = floatOrDefault(lines, "ATMOSPHERE", "MinWind", 5.0f);
 	infoValues[FIELD_MAXWIND] = floatOrDefault(lines, "ATMOSPHERE", "MaxWind", 25.0f);
 
+	// Start positions: [TEAMn] blocks with StartPosX/StartPosZ (elmos).
+	startPositions.clear();
+	{
+		float posX = 0.0f;
+		bool haveX = false;
+		for (size_t i = 0; i < lines.size(); ++i)
+		{
+			std::string line = lowered(trimmed(lines[i]));
+			if (line.compare(0, 8, "startposx") == 0)
+			{
+				posX = (float)atof(line.c_str() + 9);
+				haveX = true;
+			} else if (line.compare(0, 8, "startposz") == 0 && haveX)
+			{
+				startPositions.push_back(std::make_pair(posX, (float)atof(line.c_str() + 9)));
+				haveX = false;
+			}
+		}
+	}
+
 	std::string water;
 	waterPresent = tdfGet(lines, "WATER", "WaterPlaneHeight", water) ||
 	               tdfGet(lines, "WATER", "WaterPlaneColor", water);
@@ -1229,6 +1354,19 @@ static void saveMapInfo()
 	tdfSet(lines, "ATMOSPHERE", "MinWind", buf);
 	snprintf(buf, sizeof(buf), "%g", infoValues[FIELD_MAXWIND]);
 	tdfSet(lines, "ATMOSPHERE", "MaxWind", buf);
+
+	// Rewrite the team blocks with the current start positions.
+	for (int i = 0; i < 64; ++i)
+		tdfRemoveSection(lines, "TEAM" + std::to_string(i));
+	for (size_t i = 0; i < startPositions.size(); ++i)
+	{
+		char sx[32], sz[32];
+		snprintf(sx, sizeof(sx), "%.0f", startPositions[i].first);
+		snprintf(sz, sizeof(sz), "%.0f", startPositions[i].second);
+		std::string section = "TEAM" + std::to_string(i);
+		tdfSet(lines, section, "StartPosX", sx);
+		tdfSet(lines, section, "StartPosZ", sz);
+	}
 
 	if (waterPresent)
 	{
@@ -1478,6 +1616,13 @@ static void handleAction(int action)
 		{
 			commitStroke();
 			mode = MODE_PAINT;
+		}
+		break;
+	case ACT_MODE_START:
+		if (mode != MODE_START)
+		{
+			commitStroke();
+			mode = MODE_START;
 		}
 		break;
 	case ACT_MODE_COLOUR:
@@ -1849,19 +1994,19 @@ static void updateSliderFromMouse(int i)
 
 	if (i == 0)
 	{
-		mapMinZ = -200.0f + t * 400.0f;
+		mapMinZ = -2000.0f + t * 4000.0f;
 		if (mapMinZ > mapMaxZ - 1.0f)
 			mapMinZ = mapMaxZ - 1.0f;
 		heightRangeDirty = true;
 	} else if (i == 1)
 	{
-		mapMaxZ = -200.0f + t * 400.0f;
+		mapMaxZ = -2000.0f + t * 4000.0f;
 		if (mapMaxZ < mapMinZ + 1.0f)
 			mapMaxZ = mapMinZ + 1.0f;
 		heightRangeDirty = true;
 	} else
 	{
-		waterHeight = -100.0f + t * 200.0f;
+		waterHeight = -2000.0f + t * 4000.0f;
 	}
 }
 
@@ -1890,8 +2035,8 @@ static void drawMapSettings()
 	// Min Z / Max Z / water height sliders.
 	const char *labels[3] = {"Min Z", "Max Z", "Water Z"};
 	float values[3] = {mapMinZ, mapMaxZ, waterHeight};
-	float lo[3] = {-200.0f, -200.0f, -100.0f};
-	float hi[3] = {200.0f, 200.0f, 100.0f};
+	float lo[3] = {-2000.0f, -2000.0f, -2000.0f};
+	float hi[3] = {2000.0f, 2000.0f, 2000.0f};
 
 	for (int i = 0; i < 3; ++i)
 	{
@@ -2955,7 +3100,7 @@ static void drawBottomBar()
 
 	// Widths: every panel gets at least the room its controls need, the rest of
 	// the window is shared between them.
-	float minW[6] = {100.0f, 156.0f, 206.0f, 152.0f, 124.0f, 246.0f};
+	float minW[6] = {100.0f, 194.0f, 206.0f, 152.0f, 124.0f, 246.0f};
 	float minSum = 0.0f;
 	for (int i = 0; i < 6; ++i)
 		minSum += minW[i];
@@ -3004,6 +3149,7 @@ static void drawBottomBar()
 	addButton(px + 38, buttonY, 34, buttonH, "Mtl", mode == MODE_METAL, ACT_MODE_METAL);
 	addButton(px + 76, buttonY, 34, buttonH, "Tex", mode == MODE_PAINT, ACT_MODE_TEXTURE);
 	addButton(px + 114, buttonY, 34, buttonH, "Col", mode == MODE_COLOUR, ACT_MODE_COLOUR);
+	addButton(px + 152, buttonY, 34, buttonH, "Pos", mode == MODE_START, ACT_MODE_START);
 
 	// Brush shape, size and falloff.
 	px = panelX[2] + 6.0f;
@@ -3144,7 +3290,7 @@ static void drawHelpPanel()
 	    {"S", "smooth"},
 	    {"P", "brush shape"},
 	    {"- / =", "brush falloff"},
-	    {"0 1 2 3", "mode"},
+	    {"0 1 2 3 4", "mode (4 = startpos)"},
 	    {"T / Y", "terrain detail"},
 	    {"[ ]", "select texture"},
 	    {", .", "texture scale"},
@@ -3794,7 +3940,38 @@ int main(int argc, char **argv)
 
 		bool inView = haveMap && Main->mousey < Main->height - Main->barHeight && activeField < 0 &&
 		              dialog == DLG_NONE;
-		bool paintingMouse = Main->mouseleft && hit < 0 && inView;
+		bool paintingMouse = Main->mouseleft && hit < 0 && inView && mode != MODE_START;
+
+		// Start position editing: left adds one, a right click (as opposed to a
+		// right drag, which orbits) removes the nearest one.
+		static bool rightPending = false;
+		static int rightDownX = 0, rightDownY = 0;
+		bool rightEvent = Main->getmouserightdown();
+
+		if (mode == MODE_START && inView)
+		{
+			if (mousePressed)
+				addStartPosition(mx, mz);
+
+			if (rightEvent)
+			{
+				rightPending = true;
+				rightDownX = Main->mousex;
+				rightDownY = Main->mousey;
+			}
+			if (rightPending && !Main->mouseright)
+			{
+				int dx = Main->mousex - rightDownX;
+				int dy = Main->mousey - rightDownY;
+				rightPending = false;
+				// A right drag orbits instead, so only a click removes.
+				if (dx * dx + dy * dy < 36)
+					removeStartPosition(mx, mz);
+			}
+		} else
+		{
+			rightPending = false;
+		}
 
 		if (rectFill)
 		{
@@ -3855,7 +4032,13 @@ int main(int argc, char **argv)
 		// rendered. Painting uses the previous frame's result, which is invisible;
 		// the brush outline below uses this one right away.
 		if (Main->mousey < Main->height - Main->barHeight)
+		{
 			Main->pickGround(Main->GetMouseX(), Main->GetMouseY(), &mx, &my, &mz);
+			if (!std::isfinite(mx) || !std::isfinite(my) || !std::isfinite(mz))
+			{
+				mx = my = mz = 0.0;
+			}
+		}
 
 		float mapUnitsX = haveMap ? map->width * 8 / 1024.0f * 2.0f : 0.0f;
 		float mapUnitsZ = haveMap ? map->height * 8 / 1024.0f * 2.0f : 0.0f;
@@ -3884,6 +4067,8 @@ int main(int argc, char **argv)
 		}
 
 		drawBrushOutline();
+		if (haveMap)
+			drawStartPositions();
 
 		glDisable(GL_BLEND);
 		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);

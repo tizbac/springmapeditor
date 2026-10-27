@@ -33,6 +33,7 @@ class engine {
 	int mousex = 0, mousey = 0;
 	int mouserelx = 0, mouserely = 0;
 	bool mouseleft = false, mouseright = false, mousecenter = false;
+	bool mouserightdown = false;
 	bool mousedown = false;
 	bool up = false, down = false, left = false, right = false;
 	bool wup = false, wdown = false;
@@ -64,6 +65,7 @@ class engine {
 	bool getwup();
 	bool getwdown();
 	bool getmousedown();
+	bool getmouserightdown();
 
 	// True once per key press (auto repeat is ignored) and consumed by the call.
 	bool getkeydown(SDL_Scancode key);
