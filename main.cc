@@ -10,97 +10,150 @@
  * Foundation; either version 2 of the License, or (at your option)
  * any later version.
  */
-#include <stdlib.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
-#include <stdio.h>
-#include <string.h>
-#include <signal.h>
-#include <unistd.h>
-#include <string>
 #include <algorithm>
 #include <cmath>
-#include <vector>
 #include <set>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include <dirent.h>
 
 #include <GL/glew.h>
-#include <FTGL/ftgl.h>
+#include <SDL3/SDL.h>
 
-#include "GlobalStuff.h"
-#include "engine.h"
-#include "light.h"
-#include "shader.h"
+#include "Map/GlobalStuff.h"
 #include "Map/ReadMap.h"
-#include "Map/SMF/mapfile.h"
-#include "Map/SMF/SmfReadMap.h"
 #include "Map/SMF/BFGroundTextures.h"
+#include "Map/SMF/SmfReadMap.h"
+#include "Map/SMF/mapfile.h"
+#include "engine.h"
+#include "font.h"
+#include "mat4.h"
+#include "terrain.h"
 #include "texturebrowser.h"
+#include "ui.h"
 #include "undostack.h"
 
 enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
 enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3 };
+enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2 };
 
-static const char* modeNames[] = {"height", "metal", "texture", "colour"};
-static const char* shapeNames[] = {"circle", "square", "triangle"};
+enum Action {
+	ACT_NONE = 0,
+	ACT_OPEN_MAP,
+	ACT_SAVE,
+	ACT_OPEN_TEXTURES,
+	ACT_SHAPE_CIRCLE,
+	ACT_SHAPE_SQUARE,
+	ACT_SHAPE_TRIANGLE,
+	ACT_SIZE_DOWN,
+	ACT_SIZE_UP,
+	ACT_FALL_DOWN,
+	ACT_FALL_UP,
+	ACT_VALUE_DOWN,
+	ACT_VALUE_UP,
+	ACT_VALUE_PICK,
+	ACT_MODE_HEIGHT,
+	ACT_MODE_METAL,
+	ACT_MODE_TEXTURE,
+	ACT_MODE_COLOUR,
+	ACT_RECT_FILL,
+	ACT_HELP,
+	ACT_DEBUG,
+	ACT_QUIT,
+	ACT_PICKER_PREV,
+	ACT_PICKER_NEXT,
+	ACT_PICKER_UP,
+	ACT_PICKER_CLOSE,
 
-static engine* Main;
-static light l0;
-gst* gs;
-static shader groundshader;
-static CSmfReadMap* map = NULL;
-static CBFGroundTextures* tex = NULL;
+	ACT_TEXTURE_BASE = 1000, // + index in the texture list
+	ACT_COLOUR_BASE = 2000,  // + 0 red, 1 green, 2 blue
+	ACT_PICKER_BASE = 3000   // + index in the current directory listing
+};
+
+static const char *modeNames[] = {"height", "metal", "texture", "colour"};
+static const char *shapeNames[] = {"circle", "square", "triangle"};
+
+static engine *Main = nullptr;
+gst *gs = nullptr;
+
+static CSmfReadMap *map = nullptr;
+static CBFGroundTextures *tex = nullptr;
 static TextureBrowser browser;
 static UndoStack undoStack;
 static Stroke currentStroke;
 static std::set<int> strokeSeen;
 
-static GLuint emptyTexture = 0;
-static unsigned char* metalmap = NULL;
-static GLuint* metaltexture = NULL;
-static GLint* landscapecache = NULL;
-static char* landscapecachestatus = NULL;
-static unsigned char* tmpdata = NULL;
+static Terrain terrain;
+static FlatRenderer ui;
+static Font fontSmall, fontLarge;
+
+static unsigned char *metalmap = nullptr;
+static GLuint metalTexture = 0;
+static GLuint heightTexture = 0;
+static int metalWidth = 0, metalHeight = 0;
+
+static std::string mapPath;
+static std::string mapDir;
+static std::string textureDir;
 
 // camera
-static float camRotX = 0.0f;
-static float camRotY = 93.3f;
-static float camRotZ = 246.0f;
-static float camDist = 20.0f;
+static float camRotX = 55.0f;
+static float camRotY = 20.0f;
+static float camRotZ = 0.0f;
+static float camDist = 17.0f;
 static float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
 static bool orbiting = false;
 
 // brush
-static float brushsize = 1.0f;   // 1.0 = 64 map squares radius
-static float hval = 0.0f;        // height/metal value the brush applies
-static float falloff = 1.0f;     // 1 = hard edge, 3 = very soft
+static int detail = 6;
+static float brushsize = 1.0f; // 1.0 = 64 map squares radius
+static float hval = 0.0f;      // height/metal value the brush applies
+static float falloff = 1.0f;   // 1 = hard edge, 3 = very soft
 static int brushShape = BRUSH_CIRCLE;
 static int mode = MODE_HEIGHT;
-static float paintScale = 1.0f;  // map texels per texture texel
-static bool browserVisible = false;
-static bool startWithBrowser = false;
+static float paintScale = 1.0f; // map squares per texture texel
 static unsigned char fixedColour[4] = {200, 180, 120, 255};
+
+static bool helpVisible = true;
+static bool rectFill = false;
+static bool rectActive = false;
+static double rectAx = 0, rectAz = 0;
+static int debugView = 0; // 0 none, 1 metal, 2 height
 
 static double mx = 0, my = 0, mz = 0;
 static double cval = 0.0;
-static double ts = 6.0;
+static bool painting = false;
 
-struct v3 {
-	float x, y, z;
-	v3() : x(0), y(0), z(0) {}
-	v3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
-	v3 crossproduct(const v3& o) const
-	{
-		return v3(y * o.z - z * o.y, z * o.x - x * o.z, x * o.y - y * o.x);
-	}
-};
+static int picker = PICK_NONE;
+static std::string pickerDir;
+static int pickerOffset = 0;
+
+static volatile sig_atomic_t interrupt_requested = 0;
+
+static void handle_interrupt(int sig)
+{
+	(void)sig;
+	interrupt_requested = 1;
+}
 
 // ---------------------------------------------------------------- helpers
 
-static int bigSquaresX() { return map->width * 8 / 1024; }
-static int bigSquaresY() { return map->height * 8 / 1024; }
+static int bigSquaresX()
+{
+	return map->width * 8 / 1024;
+}
+static int bigSquaresY()
+{
+	return map->height * 8 / 1024;
+}
 
-float GetH(CSmfReadMap* m, int x, int y)
+float GetH(CSmfReadMap *m, int x, int y)
 {
 	if (x < 0 || y < 0)
 		return 0.0;
@@ -113,34 +166,67 @@ float GetH(CSmfReadMap* m, int x, int y)
 	return f;
 }
 
-static void markBigSquareDirty(int sqX, int sqY)
+static void markTerrainDirty(int squareX, int squareY)
 {
-	int bx = sqX / 128;
-	int by = sqY / 128;
+	int bx = squareX / 128;
+	int by = squareY / 128;
 	if (bx < 0 || by < 0 || bx >= bigSquaresX() || by >= bigSquaresY())
 		return;
-	landscapecachestatus[by * bigSquaresX() + bx] = 'u';
+	terrain.markDirty(bx, by);
 }
 
-void SetH(CSmfReadMap* m, int x, int y, float value)
+static void rebuildMetalTexture()
 {
-	if (x < 0 || y < 0)
-		return;
-	if (x > gs->mapx || y > gs->mapy)
-		return;
+	if (!metalTexture)
+		glGenTextures(1, &metalTexture);
 
-	int i = (gs->mapx + 1) * y + x;
-	if (!strokeSeen.count(i)) {
-		strokeSeen.insert(i);
-		currentStroke.type = EDIT_HEIGHT;
-		currentStroke.index.push_back(i);
-		currentStroke.oldValue.push_back(m->heightmap[i]);
+	glBindTexture(GL_TEXTURE_2D, metalTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	std::vector<unsigned char> rgba((size_t)metalWidth * metalHeight * 4, 0);
+	for (int i = 0; i < metalWidth * metalHeight; ++i)
+	{
+		rgba[(size_t)i * 4 + 0] = metalmap[i];
+		rgba[(size_t)i * 4 + 1] = metalmap[i];
+		rgba[(size_t)i * 4 + 2] = metalmap[i];
+		rgba[(size_t)i * 4 + 3] = 255;
 	}
-	m->heightmap[i] = value;
-	markBigSquareDirty(x, y);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, metalWidth, metalHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+	             rgba.data());
 }
 
-float GetM(CSmfReadMap* m, int x_, int y_)
+static void rebuildHeightTexture()
+{
+	int w = gs->mapx + 1, h = gs->mapy + 1;
+	if (!heightTexture)
+		glGenTextures(1, &heightTexture);
+
+	glBindTexture(GL_TEXTURE_2D, heightTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+	std::vector<unsigned char> rgba((size_t)w * h * 4, 255);
+	for (int y = 0; y < h; ++y)
+	{
+		for (int x = 0; x < w; ++x)
+		{
+			float v = map->heightmap[(size_t)y * w + x];
+			unsigned char c = (unsigned char)std::min(255.0, std::max(0.0, v / 20.0 * 255.0));
+			size_t i = ((size_t)y * w + x) * 4;
+			rgba[i + 0] = c;
+			rgba[i + 1] = c;
+			rgba[i + 2] = c;
+		}
+	}
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+}
+
+static float GetM(CSmfReadMap *m, int x_, int y_)
 {
 	int x = x_ / 2;
 	int y = y_ / 2;
@@ -149,10 +235,10 @@ float GetM(CSmfReadMap* m, int x_, int y_)
 	if (x > m->width / 2 - 1 || y > m->height / 2 - 1)
 		return 0.0;
 	int i = (m->width / 2) * y + x;
-	return (float)metalmap[i] / 255.0f;
+	return (float)metalmap[i] / 255.0;
 }
 
-void SetM(CSmfReadMap* m, int x_, int y_, float value)
+static void SetM(CSmfReadMap *m, int x_, int y_, float value)
 {
 	int x = x_ / 2;
 	int y = y_ / 2;
@@ -161,10 +247,9 @@ void SetM(CSmfReadMap* m, int x_, int y_, float value)
 	if (x > m->width / 2 - 1 || y > m->height / 2 - 1)
 		return;
 
-	markBigSquareDirty(x_ & ~1, y_ & ~1);
-
 	int i = (m->width / 2) * y + x;
-	if (!strokeSeen.count(i)) {
+	if (!strokeSeen.count(i))
+	{
 		strokeSeen.insert(i);
 		currentStroke.type = EDIT_METAL;
 		currentStroke.index.push_back(i);
@@ -173,62 +258,41 @@ void SetM(CSmfReadMap* m, int x_, int y_, float value)
 	metalmap[i] = (unsigned char)std::max(0.0, std::min(255.0, value * 255.0));
 }
 
-// Paint one map square with coverage `coverage` (0..1) of colour rgba.
-static void PaintSquare(int sqX, int sqY, const unsigned char rgba[3], float coverage)
+static void SetH(CSmfReadMap *m, int x, int y, float value)
 {
-	if (coverage <= 0.0f)
+	if (x < 0 || y < 0)
+		return;
+	if (x > gs->mapx || y > gs->mapy)
 		return;
 
-	int bx = sqX / tex->bigSquareSize;
-	int by = sqY / tex->bigSquareSize;
-	if (bx < 0 || by < 0 || bx >= tex->numBigSquaresX() || by >= tex->numBigSquaresY())
-		return;
-
-	int idx = tex->paintTexelIndex(bx, by, sqX % tex->bigSquareSize, sqY % tex->bigSquareSize);
-
-	unsigned char old[4];
-	tex->getPaintTexel(idx, old);
-
-	if (!strokeSeen.count(idx)) {
-		strokeSeen.insert(idx);
-		currentStroke.type = EDIT_PAINT;
-		currentStroke.index.push_back(idx);
-		currentStroke.oldValue.push_back((float)old[0]);
-		currentStroke.oldValue.push_back((float)old[1]);
-		currentStroke.oldValue.push_back((float)old[2]);
-		currentStroke.oldValue.push_back((float)old[3]);
+	int i = (gs->mapx + 1) * y + x;
+	if (!strokeSeen.count(i))
+	{
+		strokeSeen.insert(i);
+		currentStroke.type = EDIT_HEIGHT;
+		currentStroke.index.push_back(i);
+		currentStroke.oldValue.push_back(m->heightmap[i]);
 	}
-
-	float a0 = old[3] / 255.0f;
-	float a1 = std::min(1.0f, a0 + coverage);
-
-	unsigned char nw[4];
-	nw[0] = (unsigned char)((old[0] * a0 + rgba[0] * coverage) / a1);
-	nw[1] = (unsigned char)((old[1] * a0 + rgba[1] * coverage) / a1);
-	nw[2] = (unsigned char)((old[2] * a0 + rgba[2] * coverage) / a1);
-	nw[3] = (unsigned char)(a1 * 255.0f);
-
-	tex->setPaintTexel(idx, nw);
+	m->heightmap[i] = value;
+	markTerrainDirty(x, y);
 }
 
-// Weight of the brush at offset (dx,dy) in map squares, 0 outside the brush.
-static double brushWeight(double dx, double dy)
+static double brushWeight(double dx, double dy, double r)
 {
-	double r = brushsize * 64.0;
-	if (r <= 0.0)
-		return 0.0;
-
 	double d;
-	if (brushShape == BRUSH_CIRCLE) {
+	if (brushShape == BRUSH_CIRCLE)
+	{
 		d = sqrt(dx * dx + dy * dy) / r;
-	} else if (brushShape == BRUSH_SQUARE) {
+	} else if (brushShape == BRUSH_SQUARE)
+	{
 		d = std::max(fabs(dx), fabs(dy)) / r;
-	} else {
+	} else
+	{
 		// Right triangle with the right angle at (0,0) and the hypotenuse
-		// passing through (r,0) and (0,r): use the distance to the edges.
-		double a = -dx;            // distance to the y axis edge
-	 double b = -dy;            // distance to the x axis edge
-		double c = (dx + dy) / sqrt(2.0); // distance to the hypotenuse
+		// through (r,0) and (0,r): use the distance to the three edges.
+		double a = -dx;
+		double b = -dy;
+		double c = (dx + dy) / sqrt(2.0);
 		if (a < 0 || b < 0 || c < 0)
 			return 0.0;
 		double inradius = r / (1.0 + sqrt(2.0));
@@ -240,56 +304,149 @@ static double brushWeight(double dx, double dy)
 	return pow(1.0 - d, falloff);
 }
 
-static void commitStroke()
+// Paints one map square with the current mode and value, weighted by w.
+static void applyAt(int x, int y, double w)
 {
-	if (!currentStroke.empty()) {
-		undoStack.commit(currentStroke);
-		currentStroke.index.clear();
-		currentStroke.oldValue.clear();
-		currentStroke.type = EDIT_HEIGHT;
-		strokeSeen.clear();
-		tex->uploadPaintLayers();
+	if (x < 0 || y < 0 || x > gs->mapx || y > gs->mapy)
+		return;
+
+	const bool smooth = Main->getkey(SDL_SCANCODE_S);
+
+	if (mode == MODE_HEIGHT)
+	{
+		float target;
+		if (smooth)
+		{
+			float avg = (GetH(map, x - 1, y) + GetH(map, x + 1, y) + GetH(map, x, y - 1) +
+			             GetH(map, x, y + 1)) /
+			            4.0f;
+			target = avg * (1.0f - (float)w) + hval * (float)w;
+		} else
+		{
+			float cur = GetH(map, x, y);
+			target = cur * (1.0f - (float)w) + hval * (float)w;
+		}
+		SetH(map, x, y, target);
+		return;
 	}
+
+	if (mode == MODE_METAL)
+	{
+		if (smooth)
+		{
+			float avg = (GetM(map, x - 2, y) + GetM(map, x + 2, y) + GetM(map, x, y - 2) +
+			             GetM(map, x, y + 2)) /
+			            4.0;
+			SetM(map, x, y, avg * (1.0 - (float)w) + hval * (float)w);
+		} else
+		{
+			float cur = GetM(map, x, y);
+			SetM(map, x, y, cur * (1.0 - (float)w) + hval * (float)w);
+		}
+		return;
+	}
+
+	int bx = x / 128;
+	int by = y / 128;
+	int px = x - bx * 128;
+	int py = y - by * 128;
+	int paintIndex = tex->paintTexelIndex(bx, by, px, py);
+
+	unsigned char old[4];
+	tex->getPaintTexel(paintIndex, old);
+
+	if (!strokeSeen.count(paintIndex))
+	{
+		strokeSeen.insert(paintIndex);
+		currentStroke.type = EDIT_PAINT;
+		currentStroke.index.push_back(paintIndex);
+		currentStroke.oldValue.push_back((float)old[0]);
+		currentStroke.oldValue.push_back((float)old[1]);
+		currentStroke.oldValue.push_back((float)old[2]);
+		currentStroke.oldValue.push_back((float)old[3]);
+	}
+
+	unsigned char dest[4];
+	if (mode == MODE_COLOUR)
+	{
+		dest[0] = fixedColour[0];
+		dest[1] = fixedColour[1];
+		dest[2] = fixedColour[2];
+		dest[3] = (unsigned char)std::min(255.0, 255.0 * w);
+		if (old[3] > dest[3])
+			dest[3] = old[3];
+	} else
+	{
+		unsigned char sampled[4] = {255, 255, 255, 0};
+		if (browser.current())
+			browser.sample(browser.selected, (double)px * paintScale, (double)py * paintScale,
+			               paintScale, sampled);
+
+		dest[0] = (unsigned char)((int)old[0] + ((int)sampled[0] - (int)old[0]) * w);
+		dest[1] = (unsigned char)((int)old[1] + ((int)sampled[1] - (int)old[1]) * w);
+		dest[2] = (unsigned char)((int)old[2] + ((int)sampled[2] - (int)old[2]) * w);
+		dest[3] = (unsigned char)std::min(255.0, std::max((double)old[3], 255.0 * w));
+	}
+
+	tex->setPaintTexel(paintIndex, dest);
 }
 
-static void applyValue(const Stroke& s, int i, bool restore)
+static void commitStroke()
 {
-	if (s.type == EDIT_HEIGHT) {
+	if (currentStroke.empty())
+		return;
+
+	undoStack.commit(currentStroke);
+	currentStroke.index.clear();
+	currentStroke.oldValue.clear();
+	currentStroke.type = EDIT_HEIGHT;
+	strokeSeen.clear();
+
+	tex->uploadPaintLayers();
+	rebuildMetalTexture();
+	if (debugView == 2)
+		rebuildHeightTexture();
+}
+
+static void applyValue(const Stroke &s, size_t i)
+{
+	if (s.type == EDIT_HEIGHT)
+	{
 		int idx = s.index[i];
 		map->heightmap[idx] = s.oldValue[i];
-		markBigSquareDirty(idx % (gs->mapx + 1), idx / (gs->mapx + 1));
-	} else if (s.type == EDIT_METAL) {
+		markTerrainDirty(idx % (gs->mapx + 1), idx / (gs->mapx + 1));
+	} else if (s.type == EDIT_METAL)
+	{
 		int idx = s.index[i];
 		metalmap[idx] = (unsigned char)std::max(0.0, std::min(255.0, (double)s.oldValue[i]));
-		markBigSquareDirty((idx % (map->width / 2)) * 2, (idx / (map->width / 2)) * 2);
-	} else if (s.type == EDIT_PAINT) {
+	} else if (s.type == EDIT_PAINT)
+	{
 		unsigned char rgba[4] = {
-			(unsigned char)s.oldValue[i * 4 + 0],
-			(unsigned char)s.oldValue[i * 4 + 1],
-			(unsigned char)s.oldValue[i * 4 + 2],
-			(unsigned char)s.oldValue[i * 4 + 3]
-		};
+		    (unsigned char)s.oldValue[i * 4 + 0], (unsigned char)s.oldValue[i * 4 + 1],
+		    (unsigned char)s.oldValue[i * 4 + 2], (unsigned char)s.oldValue[i * 4 + 3]};
 		tex->setPaintTexel(s.index[i], rgba);
 	}
 }
 
-// Returns the inverse stroke needed to redo the undo.
-static Stroke invertStroke(const Stroke& s)
+// Returns the stroke that undoes the undo, i.e. the redo stroke.
+static Stroke invertStroke(const Stroke &s)
 {
 	Stroke r;
 	r.type = s.type;
 
-	for (size_t i = 0; i < s.index.size(); ++i) {
+	for (size_t i = 0; i < s.index.size(); ++i)
+	{
 		int idx = s.index[i];
-		if (s.type == EDIT_HEIGHT) {
+		if (s.type == EDIT_HEIGHT)
+		{
 			r.index.push_back(idx);
 			r.oldValue.push_back(map->heightmap[idx]);
-			markBigSquareDirty(idx % (gs->mapx + 1), idx / (gs->mapx + 1));
-		} else if (s.type == EDIT_METAL) {
+		} else if (s.type == EDIT_METAL)
+		{
 			r.index.push_back(idx);
 			r.oldValue.push_back((float)metalmap[idx]);
-			markBigSquareDirty((idx % (map->width / 2)) * 2, (idx / (map->width / 2)) * 2);
-		} else {
+		} else
+		{
 			unsigned char cur[4];
 			tex->getPaintTexel(idx, cur);
 			r.index.push_back(idx);
@@ -301,7 +458,7 @@ static Stroke invertStroke(const Stroke& s)
 	}
 
 	for (size_t i = 0; i < s.index.size(); ++i)
-		applyValue(s, (int)i, true);
+		applyValue(s, i);
 
 	return r;
 }
@@ -310,9 +467,16 @@ static void doUndo()
 {
 	if (!undoStack.canUndo())
 		return;
+
 	Stroke s = undoStack.undoLast();
 	Stroke inverse = invertStroke(s);
 	undoStack.pushRedo(inverse);
+
+	tex->uploadPaintLayers();
+	rebuildMetalTexture();
+	if (debugView == 2)
+		rebuildHeightTexture();
+
 	printf("Undo: %d entries (%s)\n", (int)s.index.size(), modeNames[s.type]);
 }
 
@@ -320,13 +484,19 @@ static void doRedo()
 {
 	if (!undoStack.canRedo())
 		return;
+
 	Stroke s = undoStack.redoLast();
 	Stroke inverse = invertStroke(s);
 	undoStack.pushUndo(inverse);
+
+	tex->uploadPaintLayers();
+	rebuildMetalTexture();
+	if (debugView == 2)
+		rebuildHeightTexture();
+
 	printf("Redo: %d entries\n", (int)s.index.size());
 }
 
-// Applies the brush centred on the cursor position (in map squares).
 static void applyBrush()
 {
 	int centreX = (int)(mx * 64.0);
@@ -336,857 +506,1160 @@ static void applyBrush()
 	if (r <= 0)
 		return;
 
-	const bool smooth = Main->getkey(SDL_SCANCODE_S);
-
-	for (int dy = -r; dy <= r; ++dy) {
-		for (int dx = -r; dx <= r; ++dx) {
-			double w = brushWeight(dx, dy);
+	for (int dy = -r; dy <= r; ++dy)
+		for (int dx = -r; dx <= r; ++dx)
+		{
+			double w = brushWeight(dx, dy, r);
 			if (w <= 0.0)
 				continue;
+			applyAt(centreX + dx, centreY + dy, w);
+		}
+}
 
-		 int x = centreX + dx;
-			int y = centreY + dy;
-			if (x < 0 || y < 0 || x > gs->mapx || y > gs->mapy)
-				continue;
+static void fillRectangle(double ax, double az, double bx, double bz)
+{
+	int x0 = (int)std::min(ax, bx) * 64;
+	int x1 = (int)std::max(ax, bx) * 64;
+	int y0 = (int)std::min(az, bz) * 64;
+	int y1 = (int)std::max(az, bz) * 64;
 
-			if (mode == MODE_HEIGHT) {
-				if (smooth) {
-					float avg = (GetH(map, x - 1, y) + GetH(map, x + 1, y) +
-					             GetH(map, x, y - 1) + GetH(map, x, y + 1)) / 4.0f;
-					float nv = hval * (float)w + avg * (1.0f - (float)w);
-					SetH(map, x, y, nv);
-				} else {
-					float cur = GetH(map, x, y);
-					float nv = hval * (float)w + cur * (1.0f - (float)w);
-					SetH(map, x, y, nv);
-				}
-			} else if (mode == MODE_METAL) {
-				if (smooth) {
-					float avg = (GetM(map, x - 2, y) + GetM(map, x + 2, y) +
-					             GetM(map, x, y - 2) + GetM(map, x, y + 2)) / 4.0;
-					float nv = hval * (float)w + avg * (1.0f - (float)w);
-					SetM(map, x, y, nv);
-				} else {
-					float cur = GetM(map, x, y);
-					float nv = hval * (float)w + cur * (1.0f - (float)w);
-					SetM(map, x, y, nv);
-				}
-			} else if (mode == MODE_PAINT || mode == MODE_COLOUR) {
-				unsigned char col[4];
-				if (mode == MODE_PAINT)
-					browser.sample(browser.selected, (double)x * 8.0, (double)y * 8.0, paintScale, col);
-				else
-					memcpy(col, fixedColour, 4);
+	for (int y = y0; y <= y1; ++y)
+		for (int x = x0; x <= x1; ++x)
+			applyAt(x, y, 1.0);
+}
 
-				PaintSquare(x, y, col, (float)w);
+// ---------------------------------------------------------------- UI
+
+struct Button {
+	float x, y, w, h;
+	std::string label;
+	bool active;
+	int id;
+};
+
+static std::vector<Button> buttons;
+
+static Mat4 screenMatrix()
+{
+	return Mat4::ortho(0.0f, (float)Main->width, 0.0f, (float)Main->height, -1.0f, 1.0f);
+}
+
+static void addButton(float x, float y, float w, float h, const char *label, bool active, int id)
+{
+	Button b;
+	b.x = x;
+	b.y = y;
+	b.w = w;
+	b.h = h;
+	b.label = label ? label : "";
+	b.active = active;
+	b.id = id;
+	buttons.push_back(b);
+	ui.addHit(id, x, y, x + w, y + h);
+}
+
+static void addPanel(float x0, float y0, float x1, float y1)
+{
+	ui.quad(x0, y0, x1, y1, 0.16f, 0.18f, 0.22f, 1.0f);
+	ui.outline(x0, y0, x1, y1, 1.0f, 0.40f, 0.44f, 0.50f, 1.0f);
+}
+
+static std::vector<std::pair<std::string, bool>> listDirectory(const std::string &dir)
+{
+	std::vector<std::pair<std::string, bool>> entries;
+	DIR *d = opendir(dir.c_str());
+	if (!d)
+		return entries;
+
+	static const char *imageExtensions[] = {".png", ".jpg", ".jpeg", ".bmp",
+	                                        ".gif", ".tga", ".webp"};
+
+	struct dirent *ent;
+	while ((ent = readdir(d)) != nullptr)
+	{
+		std::string name = ent->d_name;
+		if (name == "." || name == "..")
+			continue;
+
+		bool isDir = (ent->d_type == DT_DIR);
+		bool isMap = name.size() > 4 && name.compare(name.size() - 4, 4, ".smf") == 0;
+		bool isImage = false;
+		for (const char *ext : imageExtensions)
+		{
+			size_t len = strlen(ext);
+			if (name.size() >= len && name.compare(name.size() - len, len, ext) == 0)
+			{
+				isImage = true;
+				break;
 			}
+		}
+
+		if (isDir || isMap || isImage)
+			entries.push_back(std::make_pair(name, isDir));
+	}
+	closedir(d);
+
+	std::sort(entries.begin(), entries.end(),
+	          [](const std::pair<std::string, bool> &a, const std::pair<std::string, bool> &b) {
+		          if (a.second != b.second)
+			          return a.second > b.second;
+		          return a.first < b.first;
+	          });
+	return entries;
+}
+
+static std::string joinPath(const std::string &a, const std::string &b)
+{
+	if (a.empty())
+		return b;
+	if (a[a.size() - 1] == '/')
+		return a + b;
+	return a + "/" + b;
+}
+
+static std::string dirName(const std::string &path)
+{
+	size_t slash = path.find_last_of('/');
+	if (slash == std::string::npos)
+		return ".";
+	if (slash == 0)
+		return "/";
+	return path.substr(0, slash);
+}
+
+// Base name of a path.
+static std::string fileName(const std::string &path)
+{
+	size_t slash = path.find_last_of('/');
+	return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// Shortens text until it fits in maxWidth pixels of the small font, so labels
+// never spill over their panel.
+static std::string fitText(const std::string &text, float maxWidth)
+{
+	if (fontSmall.textWidth(text.c_str()) <= maxWidth)
+		return text;
+	std::string out = text;
+	while (!out.empty() && fontSmall.textWidth((out + "...").c_str()) > maxWidth)
+		out.erase(out.size() - 1);
+	return out + "...";
+}
+
+// Number of directory entries shown at once by the picker panels.
+static const int kPickerRows = 12;
+
+static std::string parentDirectory(const std::string &dir)
+{
+	if (dir.empty() || dir == "." || dir == "/")
+		return std::string();
+	std::string parent = dirName(dir);
+	if (parent == dir)
+		return std::string();
+	return parent;
+}
+
+static void loadMap(const std::string &path)
+{
+	commitStroke();
+
+	if (tex)
+	{
+		delete tex;
+		tex = nullptr;
+	}
+	if (map)
+	{
+		if (metalmap)
+			map->FreeInfoMap("metal", metalmap);
+		delete map;
+		map = nullptr;
+	}
+
+	undoStack.clear();
+	currentStroke.index.clear();
+	currentStroke.oldValue.clear();
+	strokeSeen.clear();
+	painting = false;
+	rectActive = false;
+	browser.DestroyGLTextures();
+
+	map = (CSmfReadMap *)CReadMap::LoadMap(path, dirName(path));
+	if (!map)
+	{
+		printf("Failed to load map %s\n", path.c_str());
+		return;
+	}
+
+	mapPath = path;
+	mapDir = dirName(path);
+
+	tex = new CBFGroundTextures(map);
+
+	MapBitmapInfo metalInfo;
+	metalmap = map->GetInfoMap("metal", &metalInfo);
+	if (!metalmap)
+	{
+		printf("No metal map in %s, creating an empty one\n", path.c_str());
+		metalWidth = map->width / 2;
+		metalHeight = map->height / 2;
+		metalmap = (unsigned char *)calloc((size_t)metalWidth * metalHeight, 1);
+	} else
+	{
+		metalWidth = metalInfo.width;
+		metalHeight = metalInfo.height;
+	}
+	rebuildMetalTexture();
+
+	terrain.build(map, tex, detail);
+
+	camRotX = 55.0f;
+	camRotY = 20.0f;
+	camRotZ = 0.0f;
+	camDist = 17.0f;
+	pivx = map->width * 8 / 1024.0;
+	pivy = 0.0f;
+	pivz = map->height * 8 / 1024.0;
+
+	if (!textureDir.empty())
+		browser.LoadDirectory(textureDir);
+
+	printf("Loaded %s (%dx%d)\n", path.c_str(), map->width, map->height);
+}
+
+static void saveMap()
+{
+	if (mapPath.empty())
+		return;
+
+	commitStroke();
+
+	FILE *mapfout = fopen(mapPath.c_str(), "rb+");
+	if (!mapfout)
+	{
+		printf("Error, cannot open %s to save data\n", mapPath.c_str());
+		return;
+	}
+
+	SMFHeader maph;
+	if (fread(&maph, sizeof(maph), 1, mapfout) != 1)
+	{
+		printf("Error, cannot read the map header\n");
+		fclose(mapfout);
+		return;
+	}
+
+	size_t datasize = (size_t)(maph.mapx + 1) * (maph.mapy + 1) * sizeof(unsigned short);
+	std::vector<unsigned short> hmapdata(datasize);
+	for (int y = 0; y < maph.mapy + 1; ++y)
+	{
+		for (int x = 0; x < maph.mapx + 1; ++x)
+		{
+			float v = map->heightmap[y * (maph.mapx + 1) + x];
+			hmapdata[y * (maph.mapx + 1) + x] = (unsigned short)std::min(
+			    65535.0, 65536.0 * std::max(0.0, std::min(1.0, (double)v)));
 		}
 	}
 
-	tex->uploadPaintLayers();
-}
+	fseek(mapfout, maph.heightmapPtr, SEEK_SET);
+	fwrite(hmapdata.data(), datasize, 1, mapfout);
+	fseek(mapfout, maph.metalmapPtr, SEEK_SET);
+	fwrite(metalmap, 1, (size_t)(map->width / 2) * (map->height / 2), mapfout);
+	fclose(mapfout);
 
-static void drawsquare(int x, int y, CSmfReadMap* m, CBFGroundTextures* t, float tilesize)
-{
-	Main->PushTransform(x * 2, y * 2, 0, 0, 0, 0);
+	printf("Height and metal maps written\n");
 
-	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, t->squares[y * bigSquaresX() + x].texture);
-	groundshader.setuniformint("maintex", 0);
-
-	glActiveTexture(GL_TEXTURE1);
-	glBindTexture(GL_TEXTURE_2D, metaltexture[y * bigSquaresX() + x]);
-	groundshader.setuniformint("metaltex", 1);
-
-	GLuint paint = t->paintTexture(x, y);
-	glActiveTexture(GL_TEXTURE2);
-	glBindTexture(GL_TEXTURE_2D, paint ? paint : emptyTexture);
-	groundshader.setuniformint("painttex", 2);
-	groundshader.setuniformint("hasPaint", paint ? 1 : 0);
-
-	glActiveTexture(GL_TEXTURE0);
-	groundshader.setuniformfloat("scale", 1.0);
-	groundshader.setuniformfloat("tx", 0);
-	groundshader.setuniformfloat("ty", 0);
-	groundshader.setuniformint("mode", mode);
-
-	if (mode == MODE_METAL)
-		glDisable(GL_LIGHTING);
-
-	tilesize = pow(2, ts);
-
-	if (Main->pointinview(x * 2, y * 2, 0) || Main->pointinview(x * 2 + 2, y * 2 + 2, 0) ||
-		Main->pointinview(x * 2 + 2, y * 2, 0) || Main->pointinview(x * 2, y * 2 + 2, 0))
+	if (tex->bakePaint())
 	{
-		if (landscapecachestatus[y * bigSquaresX() + x] == 'e' || landscapecachestatus[y * bigSquaresX() + x] == 'u')
-		{
-			if (mode == MODE_METAL)
-			{
-				int mmapsqsize = (m->header.mapx / 2) / bigSquaresX();
+		printf("Compressing painted tiles...\n");
+		if (tex->writeTileFiles(mapPath))
+			printf("Tile file updated (%d tiles)\n", tex->numTiles());
+	}
 
-                glActiveTexture(GL_TEXTURE1);
-                glBindTexture(GL_TEXTURE_2D, metaltexture[y * bigSquaresX() + x]);
-
-                for (int yb = 0; yb < mmapsqsize && yb + y < m->height / 2; ++yb) {
-                    for (int xb = 0; xb < mmapsqsize && xb + x < m->width / 2; ++xb)
-                        tmpdata[mmapsqsize * yb + xb] = (unsigned char)(255.0 * GetM(m, x * 1024 / 8 + xb * 2, y * 1024 / 8 + yb * 2));
-                }
-                gluBuild2DMipmaps(GL_TEXTURE_2D, 1, mmapsqsize, mmapsqsize, GL_LUMINANCE, GL_UNSIGNED_BYTE, tmpdata);
-                glActiveTexture(GL_TEXTURE0);
-            }
-
-		 glNewList(landscapecache[y * bigSquaresX() + x], GL_COMPILE_AND_EXECUTE);
-
-			int sqsize = (int)(1024.0 / tilesize);
-
-			for (int Y = 0; Y < 1024.0 / tilesize; ++Y) {
-				for (int X = 0; X < 1024.0 / tilesize; ++X) {
-					float z1 = GetH(m, 1.0 / sqsize + x * 128 + X * tilesize / 8, -1.0 / sqsize + y * 128 + Y * tilesize / 8);
-					float z2 = GetH(m, 1.0 / sqsize + x * 128 + (X + 1) * tilesize / 8, -1.0 / sqsize + y * 128 + Y * tilesize / 8);
-                    float z3 = GetH(m, 1.0 / sqsize + x * 128 + (X + 1) * tilesize / 8, -1.0 / sqsize + y * 128 + (Y + 1) * tilesize / 8);
-                    float z4 = GetH(m, 1.0 / sqsize + x * 128 + X * tilesize / 8, -1.0 / sqsize + y * 128 + (Y + 1) * tilesize / 8);
-
-                    float x1 = X * (1.0 / sqsize * 2.0);
-                    float x2 = (X + 1) * (1.0 / sqsize * 2.0);
-                    float y1 = Y * (1.0 / sqsize * 2.0);
-                    float y2 = (Y + 1) * (1.0 / sqsize * 2.0);
-
-                    glBegin(GL_TRIANGLES);
-
-                    v3 a, b, n;
-                    a.x = x2 - x1; a.y = 0; a.z = z2 - z1;
-                    b.x = x2 - x1; b.y = y2 - y1; b.z = z3 - z1;
-                    n = a.crossproduct(b);
-                    glNormal3f(n.x, n.y, n.z);
-                    glTexCoord2f((float)X / sqsize, (float)Y / sqsize);
-                    glVertex3f(x1, y1, z1);
-                    glTexCoord2f((float)(X + 1) / sqsize, (float)Y / sqsize);
-                    glVertex3f(x2, y1, z2);
-                    glTexCoord2f((float)(X + 1) / sqsize, (float)(Y + 1) / sqsize);
-                    glVertex3f(x2, y2, z3);
-
-                    a.x = x1 - x2; a.y = 0; a.z = z4 - z3;
-                    b.x = x1 - x2; b.y = y1 - y2; b.z = z1 - z3;
-                    n = a.crossproduct(b);
-                    glNormal3f(n.x, n.y, n.z);
-                    glTexCoord2f((float)(X + 1) / sqsize, (float)(Y + 1) / sqsize);
-                    glVertex3f(x2, y2, z3);
-                    glTexCoord2f((float)X / sqsize, (float)(Y + 1) / sqsize);
-                    glVertex3f(x1, y2, z4);
-                    glTexCoord2f((float)X / sqsize, (float)Y / sqsize);
-                    glVertex3f(x1, y1, z1);
-
-                    glEnd();
-                }
-            }
-
-            glEndList();
-            landscapecachestatus[y * bigSquaresX() + x] = 'o';
-        } else {
-            glCallList(landscapecache[y * bigSquaresX() + x]);
-        }
-    }
-
-    if (mode == MODE_METAL)
-        glEnable(GL_LIGHTING);
-
-    glBindTexture(GL_TEXTURE_2D, 0);
-    Main->PopTransform();
+	printf("Save complete\n");
 }
 
-static std::string FindFont()
+static void handleAction(int action)
 {
-	const char* env = getenv("SPRINGMAPEDITOR_FONT");
+	switch (action)
+	{
+	case ACT_OPEN_MAP:
+		picker = PICK_MAP;
+		pickerDir = mapDir.empty() ? "." : mapDir;
+		pickerOffset = 0;
+		break;
+	case ACT_SAVE:
+		saveMap();
+		break;
+	case ACT_OPEN_TEXTURES:
+		picker = PICK_TEXTURES;
+		pickerDir = textureDir.empty() ? (mapDir.empty() ? "." : mapDir) : textureDir;
+		pickerOffset = 0;
+		break;
+	case ACT_SHAPE_CIRCLE:
+		brushShape = BRUSH_CIRCLE;
+		break;
+	case ACT_SHAPE_SQUARE:
+		brushShape = BRUSH_SQUARE;
+		break;
+	case ACT_SHAPE_TRIANGLE:
+		brushShape = BRUSH_TRIANGLE;
+		break;
+	case ACT_SIZE_DOWN:
+		brushsize = std::max(0.1f, brushsize - 0.5f);
+		break;
+	case ACT_SIZE_UP:
+		brushsize = std::min(100.0f, brushsize + 0.5f);
+		break;
+	case ACT_FALL_DOWN:
+		falloff = std::max(0.2f, falloff - 0.2f);
+		break;
+	case ACT_FALL_UP:
+		falloff = std::min(4.0f, falloff + 0.2f);
+		break;
+	case ACT_VALUE_DOWN:
+		hval -= 0.1f;
+		break;
+	case ACT_VALUE_UP:
+		hval += 0.1f;
+		break;
+	case ACT_VALUE_PICK:
+		hval = (float)cval;
+		break;
+	case ACT_MODE_HEIGHT:
+		if (mode != MODE_HEIGHT)
+		{
+			commitStroke();
+			mode = MODE_HEIGHT;
+		}
+		break;
+	case ACT_MODE_METAL:
+		if (mode != MODE_METAL)
+		{
+			commitStroke();
+			mode = MODE_METAL;
+		}
+		break;
+	case ACT_MODE_TEXTURE:
+		if (mode != MODE_PAINT)
+		{
+			commitStroke();
+			mode = MODE_PAINT;
+		}
+		break;
+	case ACT_MODE_COLOUR:
+		if (mode != MODE_COLOUR)
+		{
+			commitStroke();
+			mode = MODE_COLOUR;
+		}
+		break;
+	case ACT_RECT_FILL:
+		rectFill = !rectFill;
+		printf("rectangle fill %s\n", rectFill ? "on" : "off");
+		break;
+	case ACT_HELP:
+		helpVisible = !helpVisible;
+		break;
+	case ACT_DEBUG:
+		debugView = (debugView + 1) % 3;
+		if (debugView == 2)
+			rebuildHeightTexture();
+		break;
+	case ACT_QUIT:
+		Main->quit = true;
+		break;
+	case ACT_PICKER_PREV:
+		pickerOffset = std::max(0, pickerOffset - kPickerRows);
+		break;
+	case ACT_PICKER_NEXT: {
+		int count = (int)listDirectory(pickerDir).size();
+		if (pickerOffset + kPickerRows < count)
+			pickerOffset += kPickerRows;
+		break;
+	}
+	case ACT_PICKER_UP: {
+		std::string parent = parentDirectory(pickerDir);
+		if (!parent.empty())
+		{
+			pickerDir = parent;
+			pickerOffset = 0;
+		}
+		break;
+	}
+	case ACT_PICKER_CLOSE:
+		picker = PICK_NONE;
+		break;
+	default:
+		break;
+	}
+}
+
+static void handlePickerClick(int index)
+{
+	std::vector<std::pair<std::string, bool>> entries = listDirectory(pickerDir);
+	if (index < 0 || index >= (int)entries.size())
+		return;
+
+	const std::string &name = entries[index].first;
+	bool isDir = entries[index].second;
+	std::string full = joinPath(pickerDir, name);
+
+	if (isDir)
+	{
+		pickerDir = full;
+		pickerOffset = 0;
+		return;
+	}
+
+	if (picker == PICK_MAP)
+	{
+		loadMap(full);
+		picker = PICK_NONE;
+	} else
+	{
+		textureDir = pickerDir;
+		int loaded = browser.LoadDirectory(textureDir);
+		for (int i = 0; i < loaded; ++i)
+		{
+			if (browser.at(i).name == name)
+			{
+				browser.select(i);
+				break;
+			}
+		}
+		printf("Texture directory set to %s (%d textures)\n", textureDir.c_str(), loaded);
+		picker = PICK_NONE;
+	}
+}
+
+static void drawPicker()
+{
+	if (picker == PICK_NONE)
+		return;
+
+	std::vector<std::pair<std::string, bool>> entries = listDirectory(pickerDir);
+
+	float panelW = 340.0f;
+	float panelH = 356.0f;
+	float x0 = 10.0f;
+	float y1 = (float)Main->height - 10.0f;
+	float y0 = y1 - panelH;
+
+	ui.begin();
+	addPanel(x0, y0, x0 + panelW, y1);
+
+	const int rows = kPickerRows;
+	float rowHeight = 22.0f;
+	float top = y1 - 34.0f;
+
+	int shown = 0;
+	for (size_t i = (size_t)pickerOffset; i < entries.size() && shown < rows; ++i, ++shown)
+	{
+		float y = top - (float)(shown + 1) * rowHeight;
+		bool isDir = entries[i].second;
+
+		ui.quad(x0 + 6, y, x0 + panelW - 6, y + rowHeight - 2, isDir ? 0.20f : 0.16f,
+		        isDir ? 0.28f : 0.19f, isDir ? 0.40f : 0.25f, 1.0f);
+		ui.addHit(ACT_PICKER_BASE + (int)i, x0 + 6, y, x0 + panelW - 6, y + rowHeight - 2);
+	}
+
+	addButton(x0 + 6, y0 + 6, 30, 20, "<", false, ACT_PICKER_PREV);
+	addButton(x0 + 40, y0 + 6, 30, 20, ">", false, ACT_PICKER_NEXT);
+	addButton(x0 + 74, y0 + 6, 34, 20, "Up", false, ACT_PICKER_UP);
+	addButton(x0 + panelW - 40, y0 + 6, 34, 20, "Close", false, ACT_PICKER_CLOSE);
+
+	ui.flush(screenMatrix(), 0);
+
+	ui.begin();
+	char title[256];
+	snprintf(title, sizeof(title), "%s", picker == PICK_MAP ? "Open map" : "Open textures");
+	ui.text(fontLarge, title, x0 + 8, y1 - 16, 1.0f, 1.0f, 1.0f, 1.0f);
+	ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
+
+	ui.begin();
+	char path[256];
+	snprintf(path, sizeof(path), "%s", pickerDir.c_str());
+	ui.text(fontSmall, path, x0 + 8, y1 - 30, 0.7f, 0.78f, 0.85f, 1.0f);
+
+	for (size_t i = (size_t)pickerOffset;
+	     i < entries.size() && shown > 0 && (int)(i - (size_t)pickerOffset) < rows; ++i)
+	{
+		int row = (int)(i - (size_t)pickerOffset);
+		float y = top - (float)(row + 1) * rowHeight;
+		char label[256];
+		snprintf(label, sizeof(label), "%s%s", entries[i].first.c_str(),
+		         entries[i].second ? "/" : "");
+		ui.text(fontSmall, label, x0 + 12, y + 6, 0.95f, 0.95f, 0.95f, 1.0f);
+	}
+
+	char count[64];
+	snprintf(count, sizeof(count), "%d entries", (int)entries.size());
+	ui.text(fontSmall, count, x0 + 8, y0 + 34, 0.6f, 0.7f, 0.8f, 1.0f);
+
+	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
+}
+
+// Draws every button registered this frame (the bar and the pickers), so the
+// buttons are always painted above the panels that own them.
+static void drawButtons()
+{
+	ui.begin();
+	for (size_t i = 0; i < buttons.size(); ++i)
+	{
+		const Button &b = buttons[i];
+		float r = b.active ? 0.30f : 0.20f;
+		float g = b.active ? 0.48f : 0.24f;
+		float bl = b.active ? 0.62f : 0.28f;
+		ui.quad(b.x, b.y, b.x + b.w, b.y + b.h, r, g, bl, 1.0f);
+		ui.outline(b.x, b.y, b.x + b.w, b.y + b.h, 1.0f, 0.45f, 0.50f, 0.55f, 1.0f);
+	}
+	ui.flush(screenMatrix(), 0);
+
+	ui.begin();
+	for (size_t i = 0; i < buttons.size(); ++i)
+	{
+		const Button &b = buttons[i];
+		if (b.label.empty())
+			continue;
+		float tw = fontSmall.textWidth(b.label.c_str());
+		ui.text(fontSmall, b.label.c_str(), b.x + (b.w - tw) * 0.5f,
+		        b.y + (b.h - fontSmall.ascent()) * 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
+	}
+	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
+}
+
+static void drawBottomBar()
+{
+	float barH = (float)Main->barHeight;
+	buttons.clear();
+	ui.clearHits();
+
+	ui.begin();
+	ui.quad(0, 0, (float)Main->width, barH, 0.12f, 0.14f, 0.17f, 1.0f);
+
+	// Panels.
+	addPanel(6, barH - 66, 106, barH - 4);                      // map
+	addPanel(112, barH - 66, 262, barH - 4);                    // mode
+	addPanel(268, barH - 66, 460, barH - 4);                    // brush
+	addPanel(466, barH - 66, 620, barH - 4);                    // value
+	addPanel(626, barH - 66, 752, barH - 4);                    // colour
+	addPanel(758, barH - 66, (float)Main->width - 6, barH - 4); // toggles
+
+	// Map buttons.
+	addButton(12, barH - 30, 42, 20, "Open", false, ACT_OPEN_MAP);
+	addButton(58, barH - 30, 42, 20, "Save", false, ACT_SAVE);
+
+	// Mode buttons.
+	addButton(118, barH - 30, 34, 20, "Hgt", mode == MODE_HEIGHT, ACT_MODE_HEIGHT);
+	addButton(156, barH - 30, 34, 20, "Mtl", mode == MODE_METAL, ACT_MODE_METAL);
+	addButton(194, barH - 30, 34, 20, "Tex", mode == MODE_PAINT, ACT_MODE_TEXTURE);
+	addButton(232, barH - 30, 34, 20, "Col", mode == MODE_COLOUR, ACT_MODE_COLOUR);
+
+	// Brush shape and size.
+	addButton(274, barH - 30, 26, 20, "O", brushShape == BRUSH_CIRCLE, ACT_SHAPE_CIRCLE);
+	addButton(304, barH - 30, 26, 20, "[]", brushShape == BRUSH_SQUARE, ACT_SHAPE_SQUARE);
+	addButton(334, barH - 30, 26, 20, "/\\", brushShape == BRUSH_TRIANGLE, ACT_SHAPE_TRIANGLE);
+	addButton(366, barH - 30, 22, 20, "-", false, ACT_SIZE_DOWN);
+	addButton(392, barH - 30, 22, 20, "+", false, ACT_SIZE_UP);
+	addButton(418, barH - 30, 22, 20, "F-", false, ACT_FALL_DOWN);
+	addButton(440, barH - 30, 22, 20, "F+", false, ACT_FALL_UP);
+
+	// Brush value.
+	addButton(472, barH - 30, 22, 20, "-", false, ACT_VALUE_DOWN);
+	addButton(498, barH - 30, 22, 20, "+", false, ACT_VALUE_UP);
+	addButton(524, barH - 30, 40, 20, "Pick", false, ACT_VALUE_PICK);
+
+	// Colour sliders.
+	for (int i = 0; i < 3; ++i)
+	{
+		float x = 632.0f + i * 36.0f;
+		float v = fixedColour[i] / 255.0f;
+		ui.quad(x, barH - 66 + 8.0f, x + 30, barH - 46, 0.18f, 0.20f, 0.24f, 1.0f);
+		ui.quad(x, barH - 66 + 8.0f, x + 30, barH - 66 + 8.0f + 12.0f * v, i == 0 ? 0.95f : 0.25f,
+		        i == 1 ? 0.95f : 0.25f, i == 2 ? 0.95f : 0.25f, 1.0f);
+		ui.addHit(ACT_COLOUR_BASE + i, x, barH - 66 + 8.0f, x + 30, barH - 46);
+	}
+
+	// Toggles.
+	addButton(764, barH - 30, 40, 20, "Rect", rectFill, ACT_RECT_FILL);
+	addButton(808, barH - 30, 40, 20, "Help", helpVisible, ACT_HELP);
+	addButton(852, barH - 30, 40, 20, "Map", debugView != 0, ACT_DEBUG);
+	addButton(896, barH - 30, 40, 20, "Quit", false, ACT_QUIT);
+	addButton(940, barH - 30, 40, 20, "Dir", false, ACT_OPEN_TEXTURES);
+
+	// Texture thumbnails.
+	int thumb = 34;
+	int maxThumb = std::min(browser.count(), 12);
+	for (int i = 0; i < maxThumb; ++i)
+	{
+		float x = 6.0f + (float)i * (thumb + 6.0f);
+		float y = 8.0f;
+		ui.addHit(ACT_TEXTURE_BASE + i, x, y, x + thumb, y + thumb);
+	}
+
+	ui.flush(screenMatrix(), 0);
+
+	// Panel titles and the value line below them.
+	const float titleY = barH - 42.0f;
+	const float infoY = barH - 58.0f;
+
+	ui.begin();
+	ui.text(fontSmall, "MAP", 12, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+	ui.text(fontSmall, "MODE", 118, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+	ui.text(fontSmall, "BRUSH", 274, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+	ui.text(fontSmall, "VALUE", 472, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+	ui.text(fontSmall, "COLOUR", 632, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+
+	char text[512];
+	std::string label = fileName(mapPath.empty() ? std::string("no map") : mapPath);
+	label = fitText(label, 92.0f);
+	ui.text(fontSmall, label.c_str(), 12, infoY, 0.7f, 0.8f, 0.9f, 1.0f);
+
+	label = fitText(modeNames[mode], 138.0f);
+	ui.text(fontSmall, label.c_str(), 118, infoY, 0.7f, 0.8f, 0.9f, 1.0f);
+
+	snprintf(text, sizeof(text), "size %.1f  falloff %.2f  %s", brushsize, falloff,
+	         shapeNames[brushShape]);
+	label = fitText(text, 180.0f);
+	ui.text(fontSmall, label.c_str(), 274, infoY, 0.7f, 0.8f, 0.9f, 1.0f);
+
+	snprintf(text, sizeof(text), "value %.2f  detail %d", hval, detail);
+	label = fitText(text, 146.0f);
+	ui.text(fontSmall, label.c_str(), 472, infoY, 0.7f, 0.8f, 0.9f, 1.0f);
+
+	if (!browser.empty())
+	{
+		const GroundTexture *current = browser.current();
+		snprintf(text, sizeof(text), "texture %s scale %.2f",
+		         current ? current->name.c_str() : "none", paintScale);
+		label = fitText(text, (float)Main->width - 764.0f - 14.0f);
+		ui.text(fontSmall, label.c_str(), 764, titleY, 0.85f, 0.9f, 0.95f, 1.0f);
+	}
+
+	snprintf(text, sizeof(text), "cursor %d,%d  fps %.1f", (int)(mx * 64.0), (int)(mz * 64.0),
+	         Main->getfps());
+	label = fitText(text, (float)Main->width - 764.0f - 14.0f);
+	ui.text(fontSmall, label.c_str(), 764, infoY, 0.6f, 0.7f, 0.8f, 1.0f);
+
+	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
+
+	// Texture thumbnails, one flush per texture.
+	for (int i = 0; i < maxThumb; ++i)
+	{
+		ui.begin();
+		float x = 6.0f + (float)i * (thumb + 6.0f);
+		float y = 8.0f;
+		bool selected = (i == browser.selected);
+		ui.quad(x - 2, y - 2, x + thumb + 2, y + thumb + 2, selected ? 1.0f : 0.35f,
+		        selected ? 0.9f : 0.40f, selected ? 0.20f : 0.45f, 1.0f);
+		ui.imageQuad(x, y, x + thumb, y + thumb, 1.0f, 1.0f, 1.0f, 1.0f);
+		ui.flush(screenMatrix(), browser.at(i).glTex);
+	}
+}
+
+static void drawHelpPanel()
+{
+	if (!helpVisible)
+		return;
+
+	float w = 240.0f;
+	float x0 = (float)Main->width - w - 8.0f;
+	float y1 = (float)Main->height - (float)Main->barHeight - 8.0f;
+	float y0 = y1 - 320.0f;
+
+	ui.begin();
+	addPanel(x0, y0, x0 + w, y1);
+	ui.flush(screenMatrix(), 0);
+
+	ui.begin();
+	static const char *keys[][2] = {
+	    {"Left drag", "apply brush"},
+	    {"Right drag", "orbit camera"},
+	    {"Wheel/Q/E", "zoom"},
+	    {"Arrows", "pan pivot"},
+	    {"A / Z", "brush size"},
+	    {"C / X", "brush value"},
+	    {"B", "pick ground value"},
+	    {"S", "smooth brush"},
+	    {"P", "brush shape"},
+	    {"- / =", "brush falloff"},
+	    {"0 1 2 3", "mode"},
+	    {"T / Y", "terrain detail"},
+	    {"[ ]", "select texture"},
+	    {", .", "texture scale"},
+	    {"R", "rectangle fill"},
+	    {"L", "show metal/height"},
+	    {"W", "wireframe"},
+	    {"F", "fullscreen"},
+	    {"Ctrl+Z", "undo"},
+	    {"Ctrl+Shift+Z", "redo"},
+	    {"Esc", "quit"},
+	};
+
+	float y = y1 - 22.0f;
+	for (int i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); ++i)
+	{
+		char text[256];
+		snprintf(text, sizeof(text), "%-13s %s", keys[i][0], keys[i][1]);
+		ui.text(fontSmall, text, x0 + 8, y, 0.85f, 0.9f, 0.95f, 1.0f);
+		y -= 14.0f;
+		if (y < y0 + 10.0f)
+			break;
+	}
+	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
+}
+
+static void drawBrushOutline()
+{
+	if (brushsize <= 0.0f)
+		return;
+
+	bool smooth = Main->getkey(SDL_SCANCODE_S);
+	float cr = smooth ? 0.0f : 1.0f;
+	float cg = smooth ? 1.0f : 0.0f;
+	float sr = brushsize;
+
+	ui.begin();
+
+	if (rectFill)
+	{
+		if (rectActive)
+		{
+			float ay = GetH(map, (int)(rectAx * 64.0), (int)(rectAz * 64.0)) + 0.1f;
+			float by = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0)) + 0.1f;
+			ui.linePoint((float)rectAx, ay, (float)rectAz, cr, cg, 0.0f, 1.0f);
+			ui.linePoint((float)mx, ay, (float)rectAz, cr, cg, 0.0f, 1.0f);
+			ui.linePoint((float)mx, by, (float)mz, cr, cg, 0.0f, 1.0f);
+			ui.linePoint((float)rectAx, by, (float)mz, cr, cg, 0.0f, 1.0f);
+		}
+	} else if (brushShape == BRUSH_SQUARE)
+	{
+		float h0 = GetH(map, (int)((mx - sr) * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
+		float h1 = GetH(map, (int)((mx + sr) * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
+		float h2 = GetH(map, (int)((mx + sr) * 64.0), (int)((mz + sr) * 64.0)) + 0.1f;
+		float h3 = GetH(map, (int)((mx - sr) * 64.0), (int)((mz + sr) * 64.0)) + 0.1f;
+		ui.linePoint((float)(mx - sr), h0, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
+		ui.linePoint((float)(mx + sr), h1, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
+		ui.linePoint((float)(mx + sr), h2, (float)(mz + sr), cr, cg, 0.0f, 1.0f);
+		ui.linePoint((float)(mx - sr), h3, (float)(mz + sr), cr, cg, 0.0f, 1.0f);
+	} else if (brushShape == BRUSH_TRIANGLE)
+	{
+		float h0 = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0)) + 0.1f;
+		float h1 = GetH(map, (int)((mx - sr) * 64.0), (int)(mz * 64.0)) + 0.1f;
+		float h2 = GetH(map, (int)(mx * 64.0), (int)((mz - sr) * 64.0)) + 0.1f;
+		ui.linePoint((float)mx, h0, (float)mz, cr, cg, 0.0f, 1.0f);
+		ui.linePoint((float)(mx - sr), h1, (float)mz, cr, cg, 0.0f, 1.0f);
+		ui.linePoint((float)mx, h2, (float)(mz - sr), cr, cg, 0.0f, 1.0f);
+	} else
+	{
+		for (int k = 0; k < 360; k += 360 / 64)
+		{
+			float angle = (float)k / 360.0f * 2.0f * 3.14159265358979323846f;
+			float dx = sin(angle) * sr;
+			float dz = cos(angle) * sr;
+			float height =
+			    GetH(map, (int)(mx * 64.0 + dx * 64.0), (int)(mz * 64.0 + dz * 64.0)) + 0.1f;
+			ui.linePoint((float)mx + dx, height, (float)mz + dz, cr, cg, 0.0f, 1.0f);
+		}
+	}
+
+	ui.flushLines(Main->vp);
+}
+
+// ---------------------------------------------------------------- main
+
+static std::string findFont()
+{
+	const char *env = getenv("SPRINGMAPEDITOR_FONT");
 	if (env && *env && access(env, R_OK) == 0)
 		return env;
 
-	static const char* candidates[] = {
-		"Vera.ttf",
-		"assets/Vera.ttf",
-		"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-		"/usr/share/fonts/TTF/DejaVuSans.ttf",
-		"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+	static const char *candidates[] = {
+	    "Vera.ttf",
+	    "assets/Vera.ttf",
+	    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+	    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+	    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 	};
-	for (const char* path : candidates)
+	for (const char *path : candidates)
 		if (access(path, R_OK) == 0)
 			return path;
 	return "";
 }
 
-// Look for a runtime asset next to the working directory first, then next to
-// the executable. Returns the original name if it cannot be found.
-static std::string FindAsset(const char* name)
+int main(int argc, char **argv)
 {
-	if (access(name, R_OK) == 0)
-		return name;
+	bool checkOnly = false;
+	std::string requestedMap;
+	std::string requestedDir;
 
-	const char* base = SDL_GetBasePath();
-	if (base)
+	for (int i = 1; i < argc; ++i)
 	{
-		std::string path = base;
-		SDL_free((void*)base);
-		path += name;
-		if (access(path.c_str(), R_OK) == 0)
-			return path;
-	}
-	return name;
-}
-
-static volatile sig_atomic_t interrupt_requested = 0;
-
-static void handle_interrupt(int sig)
-{
-	(void)sig;
-	interrupt_requested = 1;
-}
-
-// Draws the help/status overlay in screen space.
-static void drawOverlay(FTGLPixmapFont& font, bool haveFont)
-{
-	Main->OverlayBegin();
-
-	// Status line at the bottom left.
-	char line[512];
-	snprintf(line, sizeof(line), "%.1f fps   mode: %s   brush: %s   radius: %d   falloff: %.2f   zoom: %.1f",
-		Main->getfps(), modeNames[mode], shapeNames[brushShape], (int)(brushsize * 64), falloff, camDist);
-	if (haveFont)
-		font.Render(line, -1, FTPoint(8, 10));
-
-	snprintf(line, sizeof(line), "brush value: %.3f   ground height: %.3f   undo stack: %d", hval, cval, (int)undoStack.undoSize());
-	if (haveFont)
-		font.Render(line, -1, FTPoint(8, 26));
-
-	// Key reference on the right.
-	const int panelW = 260;
-	const int panelX = Main->width - panelW - 6;
-
-	glColor4f(0.0f, 0.0f, 0.0f, 0.55f);
-	glBegin(GL_QUADS);
-	glVertex2f(panelX, 0);
-	glVertex2f(Main->width, 0);
-	glVertex2f(Main->width, Main->height);
-	glVertex2f(panelX, Main->height);
-	glEnd();
-	glColor4f(1, 1, 1, 1);
-
-	if (haveFont)
-	{
-		font.FaceSize(10);
-		int y = Main->height - 12;
-		const char* keys[][2] = {
-			{"Left drag", "paint brush"},
-			{"Right drag", "orbit camera"},
-			{"Wheel / Q E", "zoom"},
-			{"Arrows", "pan pivot"},
-			{"A / Z", "brush size"},
-			{"C / X", "brush value"},
-			{"S", "smooth brush"},
-			{"B", "pick ground value"},
-			{"P", "brush shape"},
-			{"- / =", "brush falloff"},
-			{"0 1 2 3", "height metal texture colour"},
-			{"T / Y", "texture detail"},
-			{"W", "wireframe"},
-			{"F", "fullscreen"},
-			{"G", "texture browser"},
-			{"[ ]", "select texture"},
-			{", .", "texture scale"},
-			{"Ctrl+Z", "undo"},
-			{"Ctrl+Shift+Z", "redo"},
-			{"Esc", "quit"},
-		};
-		for (int i = 0; i < (int)(sizeof(keys) / sizeof(keys[0])); ++i) {
-			char text[128];
-			snprintf(text, sizeof(text), "%-13s %s", keys[i][0], keys[i][1]);
-			font.Render(text, -1, FTPoint(panelX + 6, y));
-			y -= 13;
-		}
-		font.FaceSize(12);
-	}
-
-	if (browserVisible && !browser.empty())
-	{
-		const int thumb = 40;
-		const int cols = 4;
-		int bx0 = panelX - (cols * thumb + 16);
-		if (bx0 < 8) bx0 = 8;
-
-		glColor4f(0.0f, 0.0f, 0.0f, 0.6f);
-		int rows = (browser.count() + cols - 1) / cols;
-		int panelH = rows * thumb + 24;
-		glBegin(GL_QUADS);
-		glVertex2f(bx0, Main->height - panelH);
-		glVertex2f(bx0 + cols * thumb + 12, Main->height - panelH);
-		glVertex2f(bx0 + cols * thumb + 12, Main->height);
-		glVertex2f(bx0, Main->height);
-		glEnd();
-		glColor4f(1, 1, 1, 1);
-
-		if (haveFont)
-		{
-			font.FaceSize(10);
-			char text[128];
-			snprintf(text, sizeof(text), "Textures (%d), G to close", browser.count());
-			font.Render(text, -1, FTPoint(bx0 + 6, Main->height - 14));
-			font.FaceSize(12);
-		}
-
-		glDisable(GL_LIGHTING);
-		// The terrain is drawn with shaders, so fixed-function texturing is off
-		// elsewhere; the thumbnails need it.
-		glEnable(GL_TEXTURE_2D);
-		for (int i = 0; i < browser.count(); ++i) {
-			int col = i % cols;
-			int row = i / cols;
-		 float x0 = bx0 + 6 + col * thumb;
-            float y0 = Main->height - 20 - (row + 1) * thumb;
-
-			glBindTexture(GL_TEXTURE_2D, browser.at(i).glTex);
-		 glBegin(GL_QUADS);
-		 glTexCoord2f(0, 0); glVertex2f(x0, y0);
-		 glTexCoord2f(1, 0); glVertex2f(x0 + thumb, y0);
-		 glTexCoord2f(1, 1); glVertex2f(x0 + thumb, y0 + thumb);
-		 glTexCoord2f(0, 1); glVertex2f(x0, y0 + thumb);
-		 glEnd();
-
-			if (i == browser.selected) {
-			 glBindTexture(GL_TEXTURE_2D, 0);
-                glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
-                glBegin(GL_LINE_LOOP);
-                glVertex2f(x0 - 1, y0 - 1);
-                glVertex2f(x0 + thumb + 1, y0 - 1);
-                glVertex2f(x0 + thumb + 1, y0 + thumb + 1);
-                glVertex2f(x0 - 1, y0 + thumb + 1);
-                glEnd();
-                glColor4f(1, 1, 1, 1);
-            }
-        }
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glDisable(GL_TEXTURE_2D);
-    }
-
-    glDisable(GL_BLEND);
-    Main->OverlayEnd();
-}
-
-static int browserHitTest()
-{
-	if (!browserVisible || browser.empty())
-		return -1;
-
-	const int panelW = 260;
-	const int panelX = Main->width - panelW - 6;
-	const int thumb = 40;
-	const int cols = 4;
-	int bx0 = panelX - (cols * thumb + 16);
-	if (bx0 < 8) bx0 = 8;
-
-	int px = Main->mousex;
-	int py = Main->mousey; // from the top
-	if (px < bx0 || px > bx0 + cols * thumb + 12)
-		return -1;
-	int rows = (browser.count() + cols - 1) / cols;
-	if (py > Main->height - 20 || py < Main->height - 20 - rows * thumb)
-		return -1;
-
-	int row = (Main->height - 20 - py) / thumb;
-	int col = (px - bx0 - 6) / thumb;
-	if (row < 0 || col < 0 || col >= cols)
-		return -1;
-	int index = row * cols + col;
-	if (index >= browser.count())
-		return -1;
-	return index;
-}
-
-int main(int argc, char** argv)
-{
-	char txt[512];
-	bool quite = false;
-	bool checkOnly = (argc > 1 && strcmp(argv[1], "--check") == 0);
-
-	std::string textureDir;
-	const char* smffile = NULL;
-	std::string smfpathstorage;
-
-	for (int i = 1; i < argc; ++i) {
-		if (strcmp(argv[i], "--check") == 0) {
+		if (strcmp(argv[i], "--check") == 0)
 			checkOnly = true;
-		} else if (strcmp(argv[i], "-textures") == 0 && i + 1 < argc) {
+		else if (strcmp(argv[i], "-textures") == 0 && i + 1 < argc)
 			textureDir = argv[++i];
-		} else if (strncmp(argv[i], "-textures=", 10) == 0) {
+		else if (strncmp(argv[i], "-textures=", 10) == 0)
 			textureDir = argv[i] + 10;
-		} else if (strcmp(argv[i], "-browser") == 0) {
-			startWithBrowser = true;
-		} else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-			printf("Usage: %s <map.smf> [map directory] [-textures <dir>] [-browser]\n", argv[0]);
+		else if (strcmp(argv[i], "-browser") == 0)
+			helpVisible = true;
+		else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0)
+		{
+			printf("Usage: %s <map.smf> [map directory] [-textures <dir>]\n", argv[0]);
 			printf("       %s --check\n", argv[0]);
 			return 0;
-		} else if (smffile == NULL) {
-			smffile = argv[i];
+		} else if (requestedMap.empty())
+			requestedMap = argv[i];
+		else if (requestedDir.empty())
+			requestedDir = argv[i];
+	}
+
+	if (!checkOnly && requestedMap.empty())
+	{
+		fprintf(stderr, "Usage: %s <map.smf> [map directory] [-textures <dir>]\n", argv[0]);
+		fprintf(stderr, "       %s --check    (initialize video/OpenGL and exit)\n", argv[0]);
+		return 1;
+	}
+
+	Main = new engine;
+	gs = new gst;
+
+	if (!Main->Init3d(1024, 768, 24, false))
+	{
+		printf("Failed to initialize OpenGL, exiting\n");
+		delete Main;
+		delete gs;
+		return 1;
+	}
+
+	printf("SDL video driver: %s\n", SDL_GetCurrentVideoDriver());
+	printf("OpenGL vendor:    %s\n", glGetString(GL_VENDOR));
+	printf("OpenGL renderer:  %s\n", glGetString(GL_RENDERER));
+	printf("OpenGL version:   %s\n", glGetString(GL_VERSION));
+
+	if (checkOnly)
+	{
+		Main->Terminate();
+		delete Main;
+		delete gs;
+		return 0;
+	}
+
+	if (!terrain.init() || !ui.init())
+	{
+		fprintf(stderr, "Failed to create the renderer, exiting\n");
+		Main->Terminate();
+		delete Main;
+		delete gs;
+		return 1;
+	}
+
+	std::string fontpath = findFont();
+	if (!fontSmall.load(fontpath, 11) || !fontLarge.load(fontpath, 15))
+		fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
+		                "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
+
+	if (!requestedDir.empty())
+		mapDir = requestedDir;
+
+	loadMap(requestedMap);
+
+	if (!textureDir.empty())
+		browser.LoadDirectory(textureDir);
+
+	Main->setBarHeight(Main->height / 5);
+	signal(SIGINT, handle_interrupt);
+
+	printf("Entering main loop\n");
+
+	while (!Main->quit && !interrupt_requested)
+	{
+		glViewport(0, 0, Main->width, Main->height);
+		Main->clearscreen(0.22f, 0.23f, 0.26f, 1.0f);
+
+		// --- camera ---
+		if (Main->mouseright && !orbiting)
+		{
+			orbiting = true;
+			pivx = (float)mx;
+			pivy = (float)my;
+			pivz = (float)mz;
 		}
-    }
+		if (!Main->mouseright)
+			orbiting = false;
 
-    if (!checkOnly && smffile == NULL)
-    {
-        fprintf(stderr, "Usage: %s <map.smf> [map directory] [-textures <dir>]\n", argv[0]);
-        fprintf(stderr, "       %s --check    (initialize video/OpenGL and exit)\n", argv[0]);
-        return 1;
-    }
+		if (orbiting)
+		{
+			camRotY += (float)Main->mouserelx * 0.4f;
+			camRotX += (float)Main->mouserely * 0.4f;
+		}
 
-    mode = MODE_HEIGHT;
-    browserVisible = startWithBrowser;
-    if (argc > 2 && !checkOnly && strcmp(argv[1], "--check") != 0 && argv[2][0] != '-')
-        smfpathstorage = argv[2];
-    else if (!checkOnly)
-    {
-        std::string mapfile = smffile;
-        size_t slash = mapfile.find_last_of("/\\");
-        smfpathstorage = (slash == std::string::npos) ? "." : mapfile.substr(0, slash);
-    }
+		if (Main->getwup())
+			camDist *= 0.85f;
+		if (Main->getwdown())
+			camDist *= 1.18f;
+		if (Main->getkey(SDL_SCANCODE_Q))
+			camDist *= 0.97f;
+		if (Main->getkey(SDL_SCANCODE_E))
+			camDist *= 1.03f;
+		camDist = std::max(0.2f, std::min(500.0f, camDist));
 
-    Main = new engine;
-    gs = new gst;
+		float pan = 20.0f / std::max(1.0, (double)Main->getfps());
+		if (Main->up)
+			pivx += pan;
+		if (Main->down)
+			pivx -= pan;
+		if (Main->left)
+			pivz += pan;
+		if (Main->right)
+			pivz -= pan;
 
-    std::string fontpath = FindFont();
-    bool haveFont = !fontpath.empty();
-    FTGLPixmapFont font(haveFont ? fontpath.c_str() : "");
-    if (haveFont)
-        font.FaceSize(12);
-    else
-        fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
-                        "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
+		// --- brush keys ---
+		float rate = 5.0f / std::max(1.0, (double)Main->getfps());
+		if (Main->getkey(SDL_SCANCODE_A) && brushsize < 100.0f)
+			brushsize += rate;
+		if (Main->getkey(SDL_SCANCODE_Z) && !Main->getkey(SDL_SCANCODE_LCTRL) && brushsize > 0.0f)
+			brushsize -= rate;
+		if (Main->getkey(SDL_SCANCODE_C))
+			hval += rate / 5.0f;
+		if (Main->getkey(SDL_SCANCODE_X))
+			hval -= rate / 5.0f;
+		if (Main->getkey(SDL_SCANCODE_B))
+			hval = (float)cval;
+		if (Main->getkey(SDL_SCANCODE_MINUS))
+			falloff = std::max(0.2f, falloff - 0.2f);
+		if (Main->getkey(SDL_SCANCODE_EQUALS))
+			falloff = std::min(4.0f, falloff + 0.2f);
 
-    if (!Main->Init3d(1024, 768, 8, false))
-    {
-        fprintf(stderr, "Failed to initialize the video subsystem.\n");
-        return 1;
-    }
+		if (Main->getkeydown(SDL_SCANCODE_T) && detail > 4)
+		{
+			detail -= 1;
+			terrain.build(map, tex, detail);
+		}
+		if (Main->getkeydown(SDL_SCANCODE_Y) && detail < 10)
+		{
+			detail += 1;
+			terrain.build(map, tex, detail);
+		}
 
-    glGenTextures(1, &emptyTexture);
-    glBindTexture(GL_TEXTURE_2D, emptyTexture);
-    {
-        unsigned char transparent[4] = {0, 0, 0, 0};
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, transparent);
-    }
+		int newMode = mode;
+		if (Main->getkeydown(SDL_SCANCODE_0))
+			newMode = MODE_HEIGHT;
+		if (Main->getkeydown(SDL_SCANCODE_1))
+			newMode = MODE_METAL;
+		if (Main->getkeydown(SDL_SCANCODE_2))
+			newMode = MODE_PAINT;
+		if (Main->getkeydown(SDL_SCANCODE_3))
+			newMode = MODE_COLOUR;
+		if (newMode != mode)
+		{
+			commitStroke();
+			mode = newMode;
+			printf("mode -> %s\n", modeNames[mode]);
+		}
 
-    if (checkOnly)
-    {
-        printf("SDL video driver: %s\n", SDL_GetCurrentVideoDriver());
-        printf("OpenGL vendor:    %s\n", glGetString(GL_VENDOR));
-        printf("OpenGL renderer:  %s\n", glGetString(GL_RENDERER));
-        printf("OpenGL version:   %s\n", glGetString(GL_VERSION));
-        Main->Terminate();
-        return 0;
-    }
+		if (Main->getkeydown(SDL_SCANCODE_P))
+			brushShape = (brushShape + 1) % 3;
 
-    l0.lightinit(GL_LIGHT0, -50, 50, 50, 1, 1, 1, 1);
+		if (Main->getkeydown(SDL_SCANCODE_R))
+			rectFill = !rectFill;
 
-    map = (CSmfReadMap*)CReadMap::LoadMap(smffile, smfpathstorage.c_str());
-    if (map == NULL)
-    {
-        fprintf(stderr, "Failed to load map '%s' from '%s'\n", smffile, smfpathstorage.c_str());
-        Main->Terminate();
-        return 1;
-    }
+		if (Main->getkeydown(SDL_SCANCODE_L))
+		{
+			debugView = (debugView + 1) % 3;
+			if (debugView == 2)
+				rebuildHeightTexture();
+		}
 
-    std::string fragmentShader = FindAsset("groundshader.frag");
-    std::string vertexShader = FindAsset("groundshader.vert");
-    groundshader.createfromfiles(fragmentShader.data(), vertexShader.data());
+		if (Main->getkeydown(SDL_SCANCODE_LEFTBRACKET))
+			browser.select(browser.selected - 1);
+		if (Main->getkeydown(SDL_SCANCODE_RIGHTBRACKET))
+			browser.select(browser.selected + 1);
+		if (Main->getkey(SDL_SCANCODE_COMMA))
+			paintScale = std::max(0.1f, paintScale * 0.9f);
+		if (Main->getkey(SDL_SCANCODE_PERIOD))
+			paintScale = std::min(64.0f, paintScale * 1.1f);
 
-    int totalSquares = bigSquaresX() * bigSquaresY();
-    landscapecache = (GLint*)malloc(totalSquares * sizeof(GLint));
-    landscapecachestatus = (char*)malloc(totalSquares + 1);
-    landscapecache[0] = glGenLists(totalSquares);
-    for (int i = 0; i < totalSquares; ++i) {
-        if (i > 0)
-            landscapecache[i] = landscapecache[0] + i;
-        landscapecachestatus[i] = 'e'; // empty
-    }
-    landscapecachestatus[totalSquares] = 0;
+		// --- undo / redo ---
+		if (Main->getkeydown(SDL_SCANCODE_Z) &&
+		    (Main->getkey(SDL_SCANCODE_LCTRL) || Main->getkey(SDL_SCANCODE_RCTRL)))
+		{
+			commitStroke();
+			if (Main->getkey(SDL_SCANCODE_LSHIFT) || Main->getkey(SDL_SCANCODE_RSHIFT))
+				doRedo();
+			else
+				doUndo();
+		}
 
-    metaltexture = (GLuint*)malloc(sizeof(GLuint) * totalSquares);
-    glGenTextures(totalSquares, metaltexture);
+		if (Main->getkeydown(SDL_SCANCODE_ESCAPE))
+			Main->quit = true;
+		if (Main->getkeydown(SDL_SCANCODE_F))
+			Main->ToggleFullScreen();
 
-    MapBitmapInfo mbi;
-    mbi.width = map->width / 2;
-    mbi.height = map->height / 2;
-    metalmap = map->GetInfoMap("metal", &mbi);
-    if (!metalmap) {
-        mbi.width = map->width / 2;
-        mbi.height = map->height / 2;
-        metalmap = (unsigned char*)calloc((size_t)(map->width / 2) * (map->height / 2), 1);
-    }
+		// --- mouse: the UI gets the first claim on a click ---
+		int hit = ui.hit((float)Main->mousex, (float)(Main->height - Main->mousey));
+		bool mousePressed = Main->getmousedown();
 
-    int mmapsqsize = (int)((float)map->header.mapx / 2.0 / (double)bigSquaresX());
-    printf("Metal map square size: %i\n", mmapsqsize);
-    tmpdata = (unsigned char*)malloc(sizeof(unsigned char) * mmapsqsize * mmapsqsize);
+		if (mousePressed && hit >= 0)
+		{
+			if (hit >= ACT_PICKER_BASE)
+			{
+				handlePickerClick(hit - ACT_PICKER_BASE);
+			} else if (hit >= ACT_TEXTURE_BASE)
+			{
+				browser.select(hit - ACT_TEXTURE_BASE);
+				if (!browser.empty())
+					printf("texture: %s\n", browser.current()->name.c_str());
+			} else if (hit >= ACT_COLOUR_BASE)
+			{
+				int channel = hit - ACT_COLOUR_BASE;
+				float barH = (float)Main->barHeight;
+				float bottom = barH - 60.0f;
+				float top = barH - 32.0f;
+				float t = (float)(Main->height - Main->mousey) - bottom;
+				float v = std::max(0.0f, std::min(1.0f, t / (top - bottom)));
+				fixedColour[channel] = (unsigned char)(v * 255.0f);
+			} else
+			{
+				handleAction(hit);
+			}
+		}
 
-    tex = new CBFGroundTextures(map);
+		bool inView = Main->mousey < Main->height - Main->barHeight;
+		bool paintingMouse = Main->mouseleft && hit < 0 && inView;
 
-    if (!textureDir.empty()) {
-        int n = browser.LoadDirectory(textureDir);
-        printf("Loaded %d textures from %s\n", n, textureDir.c_str());
-    }
+		if (rectFill)
+		{
+			if (mousePressed && inView)
+			{
+				commitStroke();
+				rectActive = true;
+				rectAx = mx;
+				rectAz = mz;
+			} else if (rectActive && !Main->mouseleft)
+			{
+				rectActive = false;
+				commitStroke();
+				fillRectangle(rectAx, rectAz, mx, mz);
+				commitStroke();
+			}
+		} else if (paintingMouse)
+		{
+			if (!painting)
+			{
+				painting = true;
+				commitStroke();
+			}
+			applyBrush();
+		} else if (painting)
+		{
+			painting = false;
+			commitStroke();
+		}
 
-    // Initial camera: look at the centre of the map.
-    pivx = map->width * 8.0 / 1024.0;
-    pivy = 0.0f;
-    pivz = map->height * 8.0 / 1024.0;
-    camDist = 20.0f;
+		// --- draw ---
+		terrain.flushDirty();
+		Main->camrx = camRotX;
+		Main->camry = camRotY;
+		Main->camrz = camRotZ;
+		Main->camdist = camDist;
+		Main->pivx = pivx;
+		Main->pivy = pivy;
+		Main->pivz = pivz;
+		Main->updateCamera();
 
-    printf("Entering main loop\n");
+		if (Main->getkey(SDL_SCANCODE_W))
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		else
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-    SDL_SetWindowRelativeMouseMode(Main->screen, true);
-    signal(SIGINT, handle_interrupt);
-    signal(SIGTERM, handle_interrupt);
+		Main->viewport3D();
 
-    bool prevUndoKey = false;
-    bool painting = false;
-    int poly = 0;
+		terrain.draw(tex, metalTexture, Main->vp, mode, metalWidth, metalHeight, 0.0f, 1.0f, 0.0f,
+		             Main->frustum);
 
-    while (quite == false && !Main->quit && !interrupt_requested)
-    {
-        Main->clearscreen(0.5, 0.5, 0.5, 1.0);
-        glLoadIdentity();
+		// Pick the map square under the cursor from the depth buffer that was just
+		// rendered. Painting uses the previous frame's result, which is invisible;
+		// the brush outline below uses this one right away.
+		if (Main->mousey < Main->height - Main->barHeight)
+			Main->pickGround(Main->GetMouseX(), Main->GetMouseY(), &mx, &my, &mz);
 
-        Main->PushTransform(0, 0, 0, 90.0, 0, 0);
-        Main->ExtractFrustum();
-        glBegin(GL_QUADS);
-        glVertex3f(0.0, 0.0, 0.01);
-        glVertex3f(map->width * 8 / 1024 * 2, 0.0, 0.0);
-        glVertex3f(map->width * 8 / 1024 * 2, map->height * 8 / 1024 * 2, 0);
-        glVertex3f(0.0, map->height * 8 / 1024 * 2, 0);
-        glEnd();
-        Main->PopTransform();
+		float mapUnitsX = map->width * 8 / 1024.0f * 2.0f;
+		float mapUnitsZ = map->height * 8 / 1024.0f * 2.0f;
 
-        Main->Make2DPositionInto3DPosition((float)Main->mousex, (float)Main->mousey, &mx, &my, &mz);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 
-        if (Main->getkey(SDL_SCANCODE_ESCAPE))
-            quite = true;
+		if (debugView != 0)
+		{
+			// Flat metal / height map over the whole map area, drawn on top.
+			glDisable(GL_DEPTH_TEST);
+			ui.begin();
+			ui.quad3(0.0f, 0.05f, 0.0f, mapUnitsX, 0.05f, 0.0f, mapUnitsX, 0.05f, mapUnitsZ, 0.0f,
+			         0.05f, mapUnitsZ, 1.0f, 1.0f, 1.0f, 1.0f);
+			ui.flush(Main->vp, debugView == 1 ? metalTexture : heightTexture);
+			glEnable(GL_DEPTH_TEST);
+		}
 
-        // --- undo / redo ---
-        bool undoKey = Main->getkey(SDL_SCANCODE_Z) && (Main->getkey(SDL_SCANCODE_LCTRL) || Main->getkey(SDL_SCANCODE_RCTRL));
-        if (undoKey && !prevUndoKey)
-        {
-            commitStroke();
-            if (Main->getkey(SDL_SCANCODE_LSHIFT) || Main->getkey(SDL_SCANCODE_RSHIFT))
-                doRedo();
-            else
-                doUndo();
-        }
-        prevUndoKey = undoKey;
+		drawBrushOutline();
 
-        // --- camera ---
-        if (Main->mouseright)
-        {
-            if (!orbiting)
-            {
-                pivx = (float)mx;
-                pivy = (float)my;
-                pivz = (float)mz;
-                orbiting = true;
-            }
-            camRotY += (float)Main->mouserelx / 8.0;
-            camRotZ += (float)Main->mouserely / 8.0;
-            SDL_HideCursor();
-        }
-        else
-        {
-            orbiting = false;
-            SDL_ShowCursor();
-        }
+		glDisable(GL_BLEND);
+		glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
 
-        // The camera distance lives in main.cc, so zoom there and let
-        // SetCamera() clamp it every frame.
-        if (Main->getwup())
-            camDist *= 0.85f;
-        if (Main->getwdown())
-            camDist *= 1.18f;
-        if (Main->getkey(SDL_SCANCODE_Q))
-            camDist *= 0.97f;
-        if (Main->getkey(SDL_SCANCODE_E))
-            camDist *= 1.03f;
-        camDist = std::max(0.2f, std::min(500.0f, camDist));
+		// --- 2D overlays, depth test off so they always sit on top ---
+		glDisable(GL_DEPTH_TEST);
+		glEnable(GL_BLEND);
+		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glViewport(0, 0, Main->width, Main->height);
+		drawBottomBar();
+		drawHelpPanel();
+		drawPicker();
+		drawButtons();
+		glEnable(GL_DEPTH_TEST);
 
-        float pan = 20.0f / std::max(1.0, (double)Main->getfps());
-        if (Main->up)
-            pivx += pan;
-        if (Main->down)
-            pivx -= pan;
-        if (Main->left)
-            pivz += pan;
-        if (Main->right)
-            pivz -= pan;
+		cval = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0));
 
-        // --- brush ---
-        if (Main->getkey(SDL_SCANCODE_A) && brushsize < 100)
-            brushsize += 5 / std::max(1.0, (double)Main->getfps());
-        if (Main->getkey(SDL_SCANCODE_Z) && !Main->getkey(SDL_SCANCODE_LCTRL) && brushsize > 0)
-            brushsize -= 5 / std::max(1.0, (double)Main->getfps());
-        if (Main->getkey(SDL_SCANCODE_C))
-            hval += 5 / std::max(1.0, (double)Main->getfps());
-        if (Main->getkey(SDL_SCANCODE_X))
-            hval -= 5 / std::max(1.0, (double)Main->getfps());
-        if (Main->getkey(SDL_SCANCODE_B))
-            hval = (float)cval;
-        if (Main->getkey(SDL_SCANCODE_MINUS))
-            falloff = std::max(0.2f, falloff - 0.2f);
-        if (Main->getkey(SDL_SCANCODE_EQUALS))
-            falloff = std::min(4.0f, falloff + 0.2f);
+		Main->display();
+	}
 
-        if (Main->getkey(SDL_SCANCODE_T) && ts > 4)
-            ts -= 1;
-        if (Main->getkey(SDL_SCANCODE_Y) && ts < 10)
-            ts += 1;
+	commitStroke();
 
-        int newMode = mode;
-        if (Main->getkey(SDL_SCANCODE_0))
-            newMode = MODE_HEIGHT;
-        if (Main->getkey(SDL_SCANCODE_1))
-            newMode = MODE_METAL;
-        if (Main->getkey(SDL_SCANCODE_2))
-            newMode = MODE_PAINT;
-        if (Main->getkey(SDL_SCANCODE_3))
-            newMode = MODE_COLOUR;
-        if (newMode != mode)
-        {
-            commitStroke();
-            mode = newMode;
-            printf("mode -> %s\n", modeNames[mode]);
-            for (int i = 0; i < totalSquares; ++i)
-                landscapecachestatus[i] = 'u';
-        }
+	Main->Terminate();
 
-        static bool prevP = false;
-        bool pDown = Main->getkey(SDL_SCANCODE_P);
-        if (pDown && !prevP)
-            brushShape = (brushShape + 1) % 3;
-        prevP = pDown;
+	bool save = false;
+	while (true)
+	{
+		printf("Save changes? [y/n] ");
+		fflush(stdout);
+		int ans = getchar();
+		if (ans == 'y')
+		{
+			save = true;
+			break;
+		}
+		if (ans == 'n' || ans == EOF)
+		{
+			save = false;
+			break;
+		}
+	}
 
-        if (Main->getkey(SDL_SCANCODE_L))
-        {
-            if (mode == MODE_METAL)
-                glDrawPixels(mbi.width, mbi.height, GL_LUMINANCE, GL_UNSIGNED_BYTE, metalmap);
-            else
-                glDrawPixels(gs->mapx + 1, gs->mapy + 1, GL_LUMINANCE, GL_FLOAT, map->heightmap);
-        }
+	if (save)
+		saveMap();
 
-        if (Main->getkey(SDL_SCANCODE_W))
-        {
-            glPolygonMode(GL_FRONT, GL_LINE);
-            glPolygonMode(GL_BACK, GL_LINE);
-        }
-        else
-        {
-            glPolygonMode(GL_FRONT, GL_FILL);
-            glPolygonMode(GL_BACK, GL_FILL);
-        }
+	if (metalmap)
+		map->FreeInfoMap("metal", metalmap);
+	if (metalTexture)
+		glDeleteTextures(1, &metalTexture);
+	if (heightTexture)
+		glDeleteTextures(1, &heightTexture);
 
-        if (Main->getkey(SDL_SCANCODE_F))
-            Main->ToggleFullScreen();
+	delete tex;
+	delete map;
+	delete Main;
+	delete gs;
 
-        static bool prevG = false;
-        bool gDown = Main->getkey(SDL_SCANCODE_G);
-        if (gDown && !prevG)
-            browserVisible = !browserVisible;
-        prevG = gDown;
-
-        int selectedBefore = browser.selected;
-        if (Main->getkey(SDL_SCANCODE_LEFTBRACKET))
-            browser.select(browser.selected - 1);
-        if (Main->getkey(SDL_SCANCODE_RIGHTBRACKET))
-            browser.select(browser.selected + 1);
-        if (Main->getkey(SDL_SCANCODE_COMMA))
-            paintScale = std::max(0.1f, paintScale * 0.9f);
-        if (Main->getkey(SDL_SCANCODE_PERIOD))
-            paintScale = std::min(64.0f, paintScale * 1.1f);
-
-        // Painting with the left mouse button, unless the click is on the
-        // texture browser.
-        int hit = browserHitTest();
-        if (hit >= 0)
-        {
-            static int lastHit = -1;
-            if (Main->mouseleft && lastHit != hit)
-                browser.select(hit);
-            lastHit = hit;
-        }
-        if (browser.selected != selectedBefore && !browser.empty())
-            printf("texture: %s\n", browser.current()->name.c_str());
-
-        Main->SetCamera(pivx, pivy, pivz, camRotX, camRotY, camRotZ, camDist);
-        l0.setpos(0.0f, -10.0f, 0.0f);
-
-        Main->PushTransform(0, 0, 0, 90.0, 0, 0);
-
-        for (int y_ = 0; y_ < bigSquaresY(); ++y_)
-            for (int x_ = 0; x_ < bigSquaresX(); ++x_)
-            {
-                groundshader.useshader();
-                drawsquare(x_, y_, map, tex, pow(2, ts));
-                glUseProgram(0);
-            }
-
-        glBindTexture(GL_TEXTURE_2D, 0);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-        glDisable(GL_LIGHTING);
-        glBegin(GL_QUADS);
-        glColor4f(0.0, 0.4, 1.0, 0.4);
-        glVertex3f(0.0, 0.0, 0.01);
-        glVertex3f(map->width * 8 / 1024 * 2, 0.0, 0.01);
-        glVertex3f(map->width * 8 / 1024 * 2, map->height * 8 / 1024 * 2, 0.01);
-        glVertex3f(0.0, map->height * 8 / 1024 * 2, 0.01);
-        glEnd();
-        glDisable(GL_BLEND);
-        glColor4f(1, 1, 1, 1);
-        Main->PopTransform();
-
-        if (Main->mouseleft && hit < 0)
-        {
-            if (!painting)
-            {
-                painting = true;
-                commitStroke();
-            }
-            applyBrush();
-        }
-        else if (painting)
-        {
-            painting = false;
-            commitStroke();
-        }
-
-        // Brush outline.
-        Main->PushTransform((float)mx, 0, (float)mz, 0, 0, 0);
-        glPolygonMode(GL_FRONT, GL_LINE);
-        glPolygonMode(GL_BACK, GL_LINE);
-        glColor3f(Main->getkey(SDL_SCANCODE_S) ? 0.0 : 1.0, Main->getkey(SDL_SCANCODE_S) ? 1.0 : 0.0, 0.0);
-
-        {
-            int r = (int)(brushsize * 64.0);
-            glBegin(GL_POLYGON);
-            for (int k = 0; k < 360; k += 360 / 64)
-            {
-                float xx1 = sin((float)k / 360.0 * 2 * 3.141592653) * brushsize;
-                float yy1 = cos((float)k / 360.0 * 2 * 3.141592653) * brushsize;
-                glVertex3f(xx1, -(GetH(map, (int)(mx * 64.0 + xx1 * 64.0), (int)(mz * 64.0 + yy1 * 64.0)) + 0.1), yy1);
-            }
-            glEnd();
-            glBegin(GL_POLYGON);
-            glColor4f(0, 1.0, 1.0, 0.2);
-            for (int k = 0; k < 360; k += 360 / 64)
-            {
-                float xx1 = sin((float)k / 360.0 * 2 * 3.141592653) * brushsize;
-                float yy1 = cos((float)k / 360.0 * 2 * 3.141592653) * brushsize;
-                glVertex3f(xx1, -(GetH(map, (int)(mx * 64.0 + xx1 * 64.0), (int)(mz * 64.0 + yy1 * 64.0)) + 0.1), yy1);
-            }
-            glEnd();
-            (void)r;
-        }
-
-        glDisable(GL_BLEND);
-        glEnable(GL_DEPTH_TEST);
-        glPolygonMode(GL_FRONT, GL_FILL);
-        Main->PopTransform();
-        glColor4f(1, 1.0, 1.0, 1.0);
-        glEnable(GL_LIGHTING);
-
-        cval = GetH(map, (int)(mx * 64.0), (int)(mz * 64.0));
-        poly = 0;
-
-        drawOverlay(font, haveFont);
-
-        Main->display();
-    }
-
-    commitStroke();
-
-    SDL_SetWindowRelativeMouseMode(Main->screen, false);
-    Main->Terminate();
-
-    bool save = false;
-    while (true)
-    {
-        printf("Save changes? [y/n] ");
-        fflush(stdout);
-        int ans = getchar();
-        if (ans == 'y')
-        {
-            save = true;
-            break;
-        }
-        if (ans == 'n' || ans == EOF)
-        {
-            save = false;
-            break;
-        }
-    }
-
-    if (save)
-    {
-        printf("Writing new maps to smf file...\n");
-        SMFHeader maph;
-        FILE* mapfout = fopen(smffile, "rb+");
-        if (!mapfout)
-        {
-            printf("Error, cannot open the map file to save data\n");
-            return 1;
-        }
-        if (fread(&maph, sizeof(maph), 1, mapfout) != 1)
-        {
-            printf("Error, cannot read the map header\n");
-            fclose(mapfout);
-            return 1;
-        }
-        printf("Header Magic: %s\n", maph.magic);
-        printf("metalmapPtr: %i      MAPX=%i    MAPY=%i\n", maph.metalmapPtr, maph.mapx, maph.mapy);
-        printf("typemapPtr: %i      MAPX=%i    MAPY=%i\n", maph.typeMapPtr, maph.mapx, maph.mapy);
-        printf("heightmapPtr: %i      MAPX=%i    MAPY=%i\n", maph.heightmapPtr, maph.mapx, maph.mapy);
-        printf("minimapPtr: %i      MAPX=%i    MAPY=%i\n", maph.minimapPtr, maph.mapx, maph.mapy);
-
-        size_t datasize = (size_t)(maph.mapx + 1) * (maph.mapy + 1) * sizeof(unsigned short);
-        printf("(%i+1)*(%i+1)*%zu=%zu\n", maph.mapx, maph.mapy, sizeof(unsigned short), datasize);
-        std::vector<unsigned short> hmapdata(datasize);
-        printf("Converting height map...\n");
-        for (int y = 0; y < maph.mapy + 1; ++y)
-            for (int x = 0; x < maph.mapx + 1; ++x)
-                hmapdata[y * (maph.mapx + 1) + x] =
-                    (unsigned short)std::min(65535.0, 65536.0 * std::max(0.0, std::min(1.0, (double)map->heightmap[y * (maph.mapx + 1) + x])));
-        printf("Done converting heightmap\n");
-
-        fseek(mapfout, maph.heightmapPtr, SEEK_SET);
-        fwrite(hmapdata.data(), datasize, 1, mapfout);
-        fseek(mapfout, maph.metalmapPtr, SEEK_SET);
-        fwrite(metalmap, 1, (size_t)(map->width / 2) * (map->height / 2), mapfout);
-        fclose(mapfout);
-
-        if (tex->bakePaint())
-        {
-            printf("Compressing painted tiles...\n");
-            if (tex->writeTileFiles(smffile))
-                printf("Tile file updated (%d tiles)\n", tex->numTiles());
-        }
-
-        printf("Save complete\n");
-    }
-
-    glDeleteTextures(totalSquares, metaltexture);
-    glDeleteLists(landscapecache[0], totalSquares);
-    glDeleteTextures(1, &emptyTexture);
-    free(metaltexture);
-    free(landscapecache);
-    free(tmpdata);
-    if (metalmap)
-        map->FreeInfoMap("metal", metalmap);
-    free(landscapecachestatus);
-
-    delete tex;
-    delete map;
-    delete Main;
-    delete gs;
-
-    printf("Exiting\n");
-    return 0;
+	printf("Exiting\n");
+	return 0;
 }

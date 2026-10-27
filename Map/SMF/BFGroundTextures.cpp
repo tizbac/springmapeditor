@@ -1,11 +1,11 @@
 
-#include <GL/glew.h>
 #include "BFGroundTextures.h"
+#include <GL/glew.h>
 
-#include "dxt1.h"
-#include "mapfile.h"
 #include "GlobalStuff.h"
 #include "SmfReadMap.h"
+#include "dxt1.h"
+#include "mapfile.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -15,23 +15,24 @@
 
 using std::string;
 
-CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
+CBFGroundTextures::CBFGroundTextures(CSmfReadMap *rm)
 {
 	usePBO = false;
-	if (GLEW_EXT_pixel_buffer_object && rm->usePBO) {
+	if (GLEW_EXT_pixel_buffer_object && rm->usePBO)
+	{
 		glGenBuffers(10, pboIDs);
 		currentPBO = 0;
 		usePBO = true;
 	}
 
-	fakevfs* ifs = rm->mapf;
+	fakevfs *ifs = rm->mapf;
 	map = rm;
 
 	bigSquareSize = 128;
 	numBigTexX = gs->mapx / bigSquareSize;
 	numBigTexY = gs->mapy / bigSquareSize;
 
-	SMFHeader* header = &map->header;
+	SMFHeader *header = &map->header;
 	ifs->Seek(header->tilesPtr);
 
 	tileSize = header->tilesize;
@@ -50,7 +51,8 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 
 	int curTile = 0;
 
-	for (int a = 0; a < tileHeader.numTileFiles; ++a) {
+	for (int a = 0; a < tileHeader.numTileFiles; ++a)
+	{
 		printf("Loading tile file\n");
 
 		long sizeOffset = ifs->GetPos();
@@ -59,7 +61,8 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 		size = swabdword(size);
 		string name;
 
-		while (true) {
+		while (true)
+		{
 			char ch;
 			ifs->Read(&ch, 1);
 			/* char, no swab */
@@ -76,11 +79,12 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 			dir += '/';
 		string path = dir + name;
 
-		fakevfs* tileFile = new fakevfs;
+		fakevfs *tileFile = new fakevfs;
 		tileFile->f = fopen(path.c_str(), "rb");
 		tileFile->Seek(0);
 
-		if (!tileFile->f) {
+		if (!tileFile->f)
+		{
 			printf("Couldnt find tile file %s\n", path.c_str());
 			memset(&tiles[(size_t)curTile * SMALL_TILE_SIZE], 0xaa, (size_t)size * SMALL_TILE_SIZE);
 			curTile += size;
@@ -94,14 +98,17 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 		TileFileHeader tfh;
 		READ_TILEFILEHEADER(tfh, tileFile);
 
-		if (strcmp(tfh.magic, "spring tilefile") != 0 || tfh.version != 1 || tfh.tileSize != 32 || tfh.compressionType != 1) {
+		if (strcmp(tfh.magic, "spring tilefile") != 0 || tfh.version != 1 || tfh.tileSize != 32 ||
+		    tfh.compressionType != 1)
+		{
 			printf("Error couldnt open tile file %s\n", path.c_str());
 			printf("tfh.magic=%s tfh.version = %i tfh.tileSize = %i, tfh.compressionType = %i\n",
 			       tfh.magic, tfh.version, tfh.tileSize, tfh.compressionType);
 			exit(0);
 		}
 
-		for (int b = 0; b < size; ++b) {
+		for (int b = 0; b < size; ++b)
+		{
 			tileFile->Read(&tiles[(size_t)curTile * SMALL_TILE_SIZE], SMALL_TILE_SIZE);
 			curTile++;
 		}
@@ -115,7 +122,8 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 	tileMapOffset = ifs->GetPos();
 	ifs->Read(tileMap.data(), count * sizeof(int));
 
-	for (int i = 0; i < count; i++) {
+	for (int i = 0; i < count; i++)
+	{
 		tileMap[i] = swabdword(tileMap[i]);
 	}
 
@@ -127,9 +135,11 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 
 	squares = new GroundSquare[numBigTexX * numBigTexY];
 
-	for (int y = 0; y < numBigTexY; ++y) {
-		for (int x = 0; x < numBigTexX; ++x) {
-			GroundSquare* square = &squares[y * numBigTexX + x];
+	for (int y = 0; y < numBigTexY; ++y)
+	{
+		for (int x = 0; x < numBigTexX; ++x)
+		{
+			GroundSquare *square = &squares[y * numBigTexX + x];
 			square->texLevel = 1;
 			square->lastUsed = -100;
 			LoadSquare(x, y, 0);
@@ -139,7 +149,8 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap* rm)
 
 CBFGroundTextures::~CBFGroundTextures(void)
 {
-	for (int i = 0; i < numBigTexX * numBigTexY; ++i) {
+	for (int i = 0; i < numBigTexX * numBigTexY; ++i)
+	{
 		glDeleteTextures(1, &squares[i].texture);
 		if (paint[i].texture)
 			glDeleteTextures(1, &paint[i].texture);
@@ -147,71 +158,67 @@ CBFGroundTextures::~CBFGroundTextures(void)
 
 	delete[] squares;
 
-	if (usePBO) {
+	if (usePBO)
+	{
 		glDeleteBuffers(10, pboIDs);
 	}
 }
 
 void CBFGroundTextures::SetTexture(int x, int y)
 {
-	GroundSquare* square = &squares[y * numBigTexX + x];
+	GroundSquare *square = &squares[y * numBigTexX + x];
 	glBindTexture(GL_TEXTURE_2D, square->texture);
 	square->lastUsed = gs->frameNum;
 }
 
-inline bool CBFGroundTextures::TexSquareInView(int btx, int bty)
-{
-	return false;
-}
-
-void CBFGroundTextures::DrawUpdate(void)
-{
-}
+void CBFGroundTextures::DrawUpdate(void) {}
 
 // ---------------------------------------------------------------- painting
 
-CBFGroundTextures::PaintLayer* CBFGroundTextures::paintLayer(int bx, int by)
+CBFGroundTextures::PaintLayer *CBFGroundTextures::paintLayer(int bx, int by)
 {
 	if (bx < 0 || by < 0 || bx >= numBigTexX || by >= numBigTexY)
 		return NULL;
 
-	PaintLayer& layer = paint[by * numBigTexX + bx];
-	if (layer.data.empty()) {
+	PaintLayer &layer = paint[by * numBigTexX + bx];
+	if (layer.data.empty())
+	{
 		layer.data.assign((size_t)bigSquareSize * bigSquareSize * 4, 0);
-	 glGenTextures(1, &layer.texture);
+		glGenTextures(1, &layer.texture);
 		glBindTexture(GL_TEXTURE_2D, layer.texture);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bigSquareSize, bigSquareSize, 0,
-		            GL_RGBA, GL_UNSIGNED_BYTE, layer.data.data());
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, bigSquareSize, bigSquareSize, 0, GL_RGBA,
+		             GL_UNSIGNED_BYTE, layer.data.data());
 	}
 	return &layer;
 }
 
-CBFGroundTextures::PaintLayer* CBFGroundTextures::existingPaintLayer(int bx, int by)
+CBFGroundTextures::PaintLayer *CBFGroundTextures::existingPaintLayer(int bx, int by)
 {
 	if (bx < 0 || by < 0 || bx >= numBigTexX || by >= numBigTexY)
 		return NULL;
-	PaintLayer& layer = paint[by * numBigTexX + bx];
+	PaintLayer &layer = paint[by * numBigTexX + bx];
 	return layer.data.empty() ? NULL : &layer;
 }
 
 GLuint CBFGroundTextures::paintTexture(int bx, int by)
 {
-	PaintLayer* layer = existingPaintLayer(bx, by);
+	PaintLayer *layer = existingPaintLayer(bx, by);
 	return layer ? layer->texture : 0;
 }
 
 void CBFGroundTextures::uploadPaintLayers()
 {
-	for (int i = 0; i < (int)paint.size(); ++i) {
+	for (int i = 0; i < (int)paint.size(); ++i)
+	{
 		if (!paintDirty[i] || paint[i].data.empty())
 			continue;
 		glBindTexture(GL_TEXTURE_2D, paint[i].texture);
-		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, bigSquareSize, bigSquareSize,
-                        GL_RGBA, GL_UNSIGNED_BYTE, paint[i].data.data());
+		glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, bigSquareSize, bigSquareSize, GL_RGBA,
+		                GL_UNSIGNED_BYTE, paint[i].data.data());
 		paintDirty[i] = 0;
 	}
 }
@@ -220,13 +227,17 @@ void CBFGroundTextures::getPaintTexel(int index, unsigned char out[4])
 {
 	int square = bigSquareOfPaintIndex(index);
 	int local = index - square * bigSquareSize * bigSquareSize;
-	const PaintLayer& layer = paint[square];
-	if (layer.data.empty() || local < 0 || local >= bigSquareSize * bigSquareSize) {
+	const PaintLayer &layer = paint[square];
+	if (layer.data.empty() || local < 0 || local >= bigSquareSize * bigSquareSize)
+	{
 		out[0] = out[1] = out[2] = out[3] = 0;
 		return;
 	}
-	const unsigned char* p = &layer.data[(size_t)local * 4];
-	out[0] = p[0]; out[1] = p[1]; out[2] = p[2]; out[3] = p[3];
+	const unsigned char *p = &layer.data[(size_t)local * 4];
+	out[0] = p[0];
+	out[1] = p[1];
+	out[2] = p[2];
+	out[3] = p[3];
 }
 
 void CBFGroundTextures::setPaintTexel(int index, const unsigned char rgba[4])
@@ -235,7 +246,7 @@ void CBFGroundTextures::setPaintTexel(int index, const unsigned char rgba[4])
 	int bx = square % numBigTexX;
 	int by = square / numBigTexX;
 
-	PaintLayer* layer = paintLayer(bx, by);
+	PaintLayer *layer = paintLayer(bx, by);
 	if (!layer)
 		return;
 
@@ -243,7 +254,7 @@ void CBFGroundTextures::setPaintTexel(int index, const unsigned char rgba[4])
 	if (local < 0 || local >= bigSquareSize * bigSquareSize)
 		return;
 
-	unsigned char* p = &layer->data[(size_t)local * 4];
+	unsigned char *p = &layer->data[(size_t)local * 4];
 	p[0] = rgba[0];
 	p[1] = rgba[1];
 	p[2] = rgba[2];
@@ -253,18 +264,19 @@ void CBFGroundTextures::setPaintTexel(int index, const unsigned char rgba[4])
 
 // ---------------------------------------------------------------- tiles
 
-void CBFGroundTextures::decodeTile(int index, unsigned char* rgba32x32) const
+void CBFGroundTextures::decodeTile(int index, unsigned char *rgba32x32) const
 {
-	const unsigned char* data = &tiles[(size_t)index * SMALL_TILE_SIZE];
+	const unsigned char *data = &tiles[(size_t)index * SMALL_TILE_SIZE];
 	dxt1_decode(data, 32, 32, rgba32x32);
 }
 
-int CBFGroundTextures::addTile(const unsigned char* rgba32x32)
+int CBFGroundTextures::addTile(const unsigned char *rgba32x32)
 {
 	static std::unordered_map<unsigned long long, int> seen;
 
 	unsigned long long hash = 14695981254224661567ull;
-	for (int i = 0; i < 32 * 32 * 4; ++i) {
+	for (int i = 0; i < 32 * 32 * 4; ++i)
+	{
 		hash ^= rgba32x32[i];
 		hash *= 1099511628211ull;
 	}
@@ -282,24 +294,31 @@ int CBFGroundTextures::addTile(const unsigned char* rgba32x32)
 	return index;
 }
 
-static float bilinear(const std::vector<unsigned char>& data, int size, float u, float v, int channel)
+static float bilinear(const std::vector<unsigned char> &data, int size, float u, float v,
+                      int channel)
 {
 	float fu = u - 0.5f;
-	if (fu < 0) fu = 0;
-	if (fu > size - 1) fu = (float)(size - 1);
+	if (fu < 0)
+		fu = 0;
+	if (fu > size - 1)
+		fu = (float)(size - 1);
 
 	int i0 = (int)fu;
 	int i1 = i0 + 1;
-	if (i1 >= size) i1 = size - 1;
+	if (i1 >= size)
+		i1 = size - 1;
 	float fx = fu - i0;
 
 	float fv = v - 0.5f;
-	if (fv < 0) fv = 0;
-	if (fv > size - 1) fv = (float)(size - 1);
+	if (fv < 0)
+		fv = 0;
+	if (fv > size - 1)
+		fv = (float)(size - 1);
 
 	int j0 = (int)fv;
 	int j1 = j0 + 1;
-	if (j1 >= size) j1 = size - 1;
+	if (j1 >= size)
+		j1 = size - 1;
 	float fy = fv - j0;
 
 	const int stride = size * 4;
@@ -319,21 +338,27 @@ bool CBFGroundTextures::bakePaint()
 	std::vector<unsigned char> base(32 * 32 * 4);
 	std::vector<unsigned char> composited(32 * 32 * 4);
 
-	for (int by = 0; by < numBigTexY; ++by) {
-		for (int bx = 0; bx < numBigTexX; ++bx) {
-			const PaintLayer& layer = paint[by * numBigTexX + bx];
+	for (int by = 0; by < numBigTexY; ++by)
+	{
+		for (int bx = 0; bx < numBigTexX; ++bx)
+		{
+			const PaintLayer &layer = paint[by * numBigTexX + bx];
 			if (layer.data.empty())
 				continue;
 
-			for (int ty = 0; ty < tilesPer; ++ty) {
-				for (int tx = 0; tx < tilesPer; ++tx) {
+			for (int ty = 0; ty < tilesPer; ++ty)
+			{
+				for (int tx = 0; tx < tilesPer; ++tx)
+				{
 					int cell = (bx * tilesPer + tx) + (by * tilesPer + ty) * tileMapXSize;
 
 					// Does any paint coverage touch this tile at all?
 					bool any = false;
 					for (int sy = 0; sy < 4 && !any; ++sy)
 						for (int sx = 0; sx < 4; ++sx)
-							if (layer.data[(size_t)(ty * 4 + sy) * bigSquareSize * 4 + (tx * 4 + sx) * 4 + 3] > 0) {
+							if (layer.data[(size_t)(ty * 4 + sy) * bigSquareSize * 4 +
+							               (tx * 4 + sx) * 4 + 3] > 0)
+							{
 								any = true;
 								break;
 							}
@@ -341,56 +366,67 @@ bool CBFGroundTextures::bakePaint()
 						continue;
 
 					int original = tileMap[cell];
-                    if (original < 0 || original >= numTiles())
-                        continue;
+					if (original < 0 || original >= numTiles())
+						continue;
 
 					decodeTile(original, base.data());
 
-                    for (int y = 0; y < 32; ++y) {
-                        for (int x = 0; x < 32; ++x) {
-                            // A tile is 32x32 ground texels; the paint layer has
-                            // one texel per map square, i.e. per 8 ground texels.
-                            float u = (float)(tx * 32 + x) / 8.0f;
-                            float v = (float)(ty * 32 + y) / 8.0f;
+					for (int y = 0; y < 32; ++y)
+					{
+						for (int x = 0; x < 32; ++x)
+						{
+							// A tile is 32x32 ground texels; the paint layer has
+							// one texel per map square, i.e. per 8 ground texels.
+							float u = (float)(tx * 32 + x) / 8.0f;
+							float v = (float)(ty * 32 + y) / 8.0f;
 
-                            float alpha = bilinear(layer.data, bigSquareSize, u, v, 3) / 255.0f;
-                            unsigned char* dst = &composited[(size_t)(y * 32 + x) * 4];
+							float alpha = bilinear(layer.data, bigSquareSize, u, v, 3) / 255.0f;
+							unsigned char *dst = &composited[(size_t)(y * 32 + x) * 4];
 
-                            if (alpha <= 0.0f) {
-                                dst[0] = base[(size_t)(y * 32 + x) * 4 + 0];
-                                dst[1] = base[(size_t)(y * 32 + x) * 4 + 1];
-                                dst[2] = base[(size_t)(y * 32 + x) * 4 + 2];
-                                dst[3] = 255;
-                            } else {
-                                float pr = bilinear(layer.data, bigSquareSize, u, v, 0);
-                                float pg = bilinear(layer.data, bigSquareSize, u, v, 1);
-                                float pb = bilinear(layer.data, bigSquareSize, u, v, 2);
+							if (alpha <= 0.0f)
+							{
+								dst[0] = base[(size_t)(y * 32 + x) * 4 + 0];
+								dst[1] = base[(size_t)(y * 32 + x) * 4 + 1];
+								dst[2] = base[(size_t)(y * 32 + x) * 4 + 2];
+								dst[3] = 255;
+							} else
+							{
+								float pr = bilinear(layer.data, bigSquareSize, u, v, 0);
+								float pg = bilinear(layer.data, bigSquareSize, u, v, 1);
+								float pb = bilinear(layer.data, bigSquareSize, u, v, 2);
 
-                                dst[0] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 0] * (1 - alpha) + pr * alpha);
-                                dst[1] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 1] * (1 - alpha) + pg * alpha);
-                                dst[2] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 2] * (1 - alpha) + pb * alpha);
-                                dst[3] = 255;
-                            }
-                        }
-                    }
+								dst[0] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 0] *
+								                             (1 - alpha) +
+								                         pr * alpha);
+								dst[1] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 1] *
+								                             (1 - alpha) +
+								                         pg * alpha);
+								dst[2] = (unsigned char)(base[(size_t)(y * 32 + x) * 4 + 2] *
+								                             (1 - alpha) +
+								                         pb * alpha);
+								dst[3] = 255;
+							}
+						}
+					}
 
-                    int newIndex = addTile(composited.data());
-                    if (newIndex != tileMap[cell]) {
-                        tileMap[cell] = newIndex;
-                        changed = true;
-                    }
-                }
-            }
-        }
+					int newIndex = addTile(composited.data());
+					if (newIndex != tileMap[cell])
+					{
+						tileMap[cell] = newIndex;
+						changed = true;
+					}
+				}
+			}
+		}
 	}
 
 	return changed;
 }
 
-bool CBFGroundTextures::writeTileFiles(const std::string& smfPath)
+bool CBFGroundTextures::writeTileFiles(const std::string &smfPath)
 {
 	int originalTotal = 0;
-	for (const TileFile& f : tileFiles)
+	for (const TileFile &f : tileFiles)
 		originalTotal += f.count;
 
 	int extra = numTiles() - originalTotal;
@@ -404,14 +440,16 @@ bool CBFGroundTextures::writeTileFiles(const std::string& smfPath)
 	if (!tileFiles.empty() && extra > 0)
 		newCount.back() += extra;
 
-	for (size_t i = 0; i < tileFiles.size(); ++i) {
+	for (size_t i = 0; i < tileFiles.size(); ++i)
+	{
 		int start = 0;
 		for (size_t k = 0; k < i; ++k)
 			start += newCount[k];
 		int count = newCount[i];
 
-		FILE* f = fopen(tileFiles[i].path.c_str(), "wb");
-		if (!f) {
+		FILE *f = fopen(tileFiles[i].path.c_str(), "wb");
+		if (!f)
+		{
 			printf("Cannot write tile file %s\n", tileFiles[i].path.c_str());
 			return false;
 		}
@@ -434,8 +472,9 @@ bool CBFGroundTextures::writeTileFiles(const std::string& smfPath)
 		fclose(f);
 	}
 
-	FILE* smf = fopen(smfPath.c_str(), "rb+");
-	if (!smf) {
+	FILE *smf = fopen(smfPath.c_str(), "rb+");
+	if (!smf)
+	{
 		printf("Cannot update tile map in %s\n", smfPath.c_str());
 		return false;
 	}
@@ -446,7 +485,8 @@ bool CBFGroundTextures::writeTileFiles(const std::string& smfPath)
 	fwrite(&total, 4, 1, smf);
 
 	// The tile count stored for every tile file in the .smf.
-	for (size_t i = 0; i < tileFiles.size(); ++i) {
+	for (size_t i = 0; i < tileFiles.size(); ++i)
+	{
 		int le = swabdword(newCount[i]);
 		fseek(smf, tileFiles[i].sizeOffset, SEEK_SET);
 		fwrite(&le, 4, 1, smf);
@@ -469,33 +509,46 @@ void CBFGroundTextures::LoadSquare(int x, int y, int level)
 {
 	int size = 1024 >> level;
 
-	GLubyte* buf = NULL; bool usedPBO = false;
-	if (usePBO) {
-		if (currentPBO > 9) currentPBO = 0;
+	GLubyte *buf = NULL;
+	bool usedPBO = false;
+	if (usePBO)
+	{
+		if (currentPBO > 9)
+			currentPBO = 0;
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pboIDs[currentPBO++]);
 		glBufferData(GL_PIXEL_UNPACK_BUFFER, size * size / 2, 0, GL_STREAM_DRAW);
 
-		//map the buffer object into client's memory
-		buf = (GLubyte*)glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+		// map the buffer object into client's memory
+		buf = (GLubyte *)glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
 		usedPBO = true;
 	}
-	if (buf == NULL) {
+	if (buf == NULL)
+	{
 		buf = new GLubyte[size * size / 2];
 		usedPBO = false;
 	}
 
-	GroundSquare* square = &squares[y * numBigTexX + x];
+	GroundSquare *square = &squares[y * numBigTexX + x];
 	square->texLevel = level;
 
 	int numblocks = 8 / (1 << level);
 
-	for (int y1 = 0; y1 < 32; y1++) {
-		for (int x1 = 0; x1 < 32; x1++) {
-			const unsigned char* tile = &tiles[(size_t)tileMap[(x1 + x * 32) + (y1 + y * 32) * tileMapXSize] * SMALL_TILE_SIZE + tileoffset[level]];
-			for (int yt = 0; yt < numblocks; yt++) {
-				for (int xt = 0; xt < numblocks; xt++) {
-					GLint* sbuf = (GLint*)&tile[(xt + yt * numblocks) * 8];
-					GLint* dbuf = (GLint*)&buf[(x1 * numblocks + xt + (y1 * numblocks + yt) * (numblocks * 32)) * 8];
+	for (int y1 = 0; y1 < 32; y1++)
+	{
+		for (int x1 = 0; x1 < 32; x1++)
+		{
+			const unsigned char *tile =
+			    &tiles[(size_t)tileMap[(x1 + x * 32) + (y1 + y * 32) * tileMapXSize] *
+			               SMALL_TILE_SIZE +
+			           tileoffset[level]];
+			for (int yt = 0; yt < numblocks; yt++)
+			{
+				for (int xt = 0; xt < numblocks; xt++)
+				{
+					GLint *sbuf = (GLint *)&tile[(xt + yt * numblocks) * 8];
+					GLint *dbuf = (GLint *)&buf[(x1 * numblocks + xt +
+					                             (y1 * numblocks + yt) * (numblocks * 32)) *
+					                            8];
 					dbuf[0] = sbuf[0];
 					dbuf[1] = sbuf[1];
 				}
@@ -508,20 +561,25 @@ void CBFGroundTextures::LoadSquare(int x, int y, int level)
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_PRIORITY, 1);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	if (GLEW_EXT_texture_edge_clamp) {
+	if (GLEW_EXT_texture_edge_clamp)
+	{
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 	}
 	if (map->anisotropy != 0.0f)
 		glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY_EXT, map->anisotropy);
 
-	if (usedPBO) {
+	if (usedPBO)
+	{
 		glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0, size * size / 2, 0);
-		glBufferData(GL_PIXEL_UNPACK_BUFFER, 0, 0, GL_STREAM_DRAW); //free it
+		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
+		                       size * size / 2, 0);
+		glBufferData(GL_PIXEL_UNPACK_BUFFER, 0, 0, GL_STREAM_DRAW); // free it
 		glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-	} else {
-		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0, size * size / 2, buf);
+	} else
+	{
+		glCompressedTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size, 0,
+		                       size * size / 2, buf);
 		delete[] buf;
 	}
 }

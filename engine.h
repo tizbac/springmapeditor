@@ -1,105 +1,84 @@
-#include <SDL3/SDL.h>
-#include <GL/glew.h>
-class engine{
-    public:
-	int height;
-	int width;
-	int bpp;
-	float fps;
-	float camx;
-	float camy;
-	float camz;
-	float pivx;
-	float pivy;
-	float pivz;
-	float camdist;
-    float camrx;
-	float camry;
-	bool mouseleft;
-	bool mouseright;
-	bool mousecenter;
-	GLdouble proj[16];
-	GLint view[3];
-	float camrz;
-	int mousex;
-	int mousey;
-	int mouserelx;
-	int mouserely;
-	bool up;
-	bool wup;
-	bool down;
-	bool wdown;
-	bool left;
-	bool right;
-	bool ctrl;
-	bool shift;
-	float frustum[6][4];
-	SDL_Event ev;
-	Uint64 cleartime;
-	Uint64 rendertime;
-	bool fullscreen;
-	bool quit;
-	const bool *keys;
-	public:
-	SDL_Window* screen;
-	SDL_GLContext context;
-	bool getkey(SDL_Scancode key);
-	float getfps(void);
-	void ExtractFrustum();
-	bool Init3d(int width = 800,int height = 600,int bpp = 24,bool fullscreen = false);
-	void clearscreen(float r = 0.0,float g = 0.0,float b = 0.0,float a = 1.0);
-	void PushTransform(float x,float y,float z,float rx,float ry,float rz);
-	bool pointinview(float x, float y , float z);
-	void Transform(float x,float y,float z,float rx,float ry,float rz);
-	void SetCameraPos(float x,float y,float z);
-	void SetCamera(float px,float py,float pz,float rx,float ry,float rz,float dist);
-	void Zoom(float amount);
-	void OrthoMode();
-	void OverlayBegin();
-	void OverlayEnd();
-	void NormalMode();
-	void SetCameraRotation(float x,float y,float z);
-	void Make2DPositionInto3DPosition (float x, float y, double *ox, double *oy, double *oz)
-    {
-        GLint viewport[4];
-        GLdouble modelview[16],projection[16];
-        GLfloat wx=x,wy,wz;
+/*
+ * engine.h - SDL window, event handling and the orbit camera.
+ *
+ * The camera is built as a matrix instead of using the fixed function
+ * transformation stack, so nothing here calls glMatrixMode/glLoadMatrix.
+ */
+#ifndef ENGINE_H
+#define ENGINE_H
 
-        glGetIntegerv(GL_VIEWPORT,viewport);
-        y=viewport[3]-y;
-        wy=y;
-        glGetDoublev(GL_MODELVIEW_MATRIX,modelview);
-        glGetDoublev(GL_PROJECTION_MATRIX,projection);
-        glReadPixels(x,y,1,1,GL_DEPTH_COMPONENT,GL_FLOAT,&wz);
-        gluUnProject(wx,wy,wz,modelview,projection,viewport,ox,oy,oz);
-    }
-	bool getwup()
-	{
-	  if ( wup )
-	  {
-	    wup = false;
-	    return true;
-	  }
-	  return false;
-	    
-	  
-	}
-	bool getwdown()
-	{
-	  if ( wdown )
-	  {
-	    wdown = false;
-	    return true;
-	  }
-	  return false;
-	    
-	  
-	}
+#include <GL/glew.h>
+#include <SDL3/SDL.h>
+
+#include "mat4.h"
+
+class engine {
+  public:
+	int height = 0;
+	int width = 0;
+	int bpp = 24;
+
+	// Pixels reserved along the bottom of the window for the editor bar.
+	int barHeight = 0;
+
+	float camx = 0.0f, camy = 0.0f, camz = 0.0f;
+	float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
+	float camdist = 20.0f;
+	float camrx = 0.0f, camry = 0.0f, camrz = 0.0f;
+
+	int mousex = 0, mousey = 0;
+	int mouserelx = 0, mouserely = 0;
+	bool mouseleft = false, mouseright = false, mousecenter = false;
+	bool mousedown = false;
+	bool up = false, down = false, left = false, right = false;
+	bool wup = false, wdown = false;
+	bool ctrl = false, shift = false;
+	bool keyPressed[SDL_SCANCODE_COUNT] = {};
+
+	Mat4 view, projection, vp, invVP;
+	float frustum[6][4];
+
+	unsigned long long cleartime = 0, rendertime = 0;
+	bool fullscreen = false;
+	bool quit = false;
+
+	SDL_Window *screen = nullptr;
+	SDL_GLContext context = nullptr;
+
+	bool Init3d(int width = 800, int height = 600, int bpp = 24, bool fullscreen = false);
+	bool Terminate();
+	bool ToggleFullScreen();
+	float getfps();
+	bool getkey(SDL_Scancode key);
+	bool getwup();
+	bool getwdown();
+	bool getmousedown();
+
+	// True once per key press (auto repeat is ignored) and consumed by the call.
+	bool getkeydown(SDL_Scancode key);
 	int GetMouseX();
 	int GetMouseY();
-	void PopTransform();
-	void display(void);
-	bool Terminate(void);
-	bool ToggleFullScreen(void);
+
+	void clearscreen(float r = 0.0f, float g = 0.0f, float b = 0.0f, float a = 1.0f);
+	void setBarHeight(int pixels);
+
+	// Rebuilds the view/projection matrices and the frustum from the camera
+	// parameters. Must be called before drawing the 3D scene.
+	void updateCamera();
+
+	// Sets the viewport to the part of the window above the editor bar.
+	void viewport3D() const;
+	// Sets the viewport to the editor bar itself.
+	void viewportBar() const;
+
+	bool pointInView(float x, float y, float z) const;
+
+	// World position of the pixel (px, py) given in window coordinates with y
+	// measured from the top. Uses the depth buffer; when the pixel is empty the
+	// ray is intersected with the ground plane y = 0.
+	bool pickGround(int px, int py, double *ox, double *oy, double *oz) const;
+
+	void display();
 };
 
+#endif // ENGINE_H

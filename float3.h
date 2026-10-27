@@ -41,7 +41,7 @@ public:
 	 *
 	 * With parameters, initializes x/y/z to the given floats.
 	 */
-	inline float3(const float x,const float y,const float z) {}
+	inline float3(const float x_,const float y_,const float z_) : x(x_), y(y_), z(z_) {}
 
 	/**
 	 * @brief Destructor

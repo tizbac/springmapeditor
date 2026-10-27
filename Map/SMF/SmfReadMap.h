@@ -9,15 +9,13 @@
 #include <cstdio>
 #include <string>
 
-using namespace std;
-
 /** Simple buffered reader for the .smf file and the referenced tile files. */
 class fakevfs
 {
 public:
 	int cseek;
 	int fsize;
-	string cpath;
+	std::string cpath;
 	FILE * f;
 
 	fakevfs() : cseek(0), fsize(0), f(NULL) {}

@@ -13,9 +13,8 @@
 
 class CSmfReadMap;
 
-class CBFGroundTextures
-{
-public:
+class CBFGroundTextures {
+  public:
 	struct GroundSquare {
 		int texLevel;
 		GLuint texture;
@@ -27,18 +26,18 @@ public:
 	// it replaces. The layer is uploaded as a second texture unit and blended
 	// with the ground tile texture in the shader (multitexturing).
 	struct PaintLayer {
-	 GLuint texture = 0;
-	 std::vector<unsigned char> data; // bigSquareSize * bigSquareSize * 4
+		GLuint texture = 0;
+		std::vector<unsigned char> data; // bigSquareSize * bigSquareSize * 4
 	};
 
-	CBFGroundTextures(CSmfReadMap* srm);
+	CBFGroundTextures(CSmfReadMap *srm);
 	~CBFGroundTextures(void);
 
 	void SetTexture(int x, int y);
 	void DrawUpdate(void);
 	void LoadSquare(int x, int y, int level);
 
-	GroundSquare* squares;
+	GroundSquare *squares;
 
 	int bigSquareSize;
 	int numBigTexX;
@@ -46,14 +45,23 @@ public:
 	std::vector<int> tileMap;
 	std::vector<unsigned char> tiles; // numTiles * SMALL_TILE_SIZE DXT1 records
 
-	int tilesPerBigSquare() const { return bigSquareSize / 4; }
-	int numBigSquaresX() const { return numBigTexX; }
-	int numBigSquaresY() const { return numBigTexY; }
+	int tilesPerBigSquare() const
+	{
+		return bigSquareSize / 4;
+	}
+	int numBigSquaresX() const
+	{
+		return numBigTexX;
+	}
+	int numBigSquaresY() const
+	{
+		return numBigTexY;
+	}
 
 	// --- painting ---
 
-	PaintLayer* paintLayer(int bx, int by);
-	PaintLayer* existingPaintLayer(int bx, int by);
+	PaintLayer *paintLayer(int bx, int by);
+	PaintLayer *existingPaintLayer(int bx, int by);
 	GLuint paintTexture(int bx, int by);
 	void uploadPaintLayers();
 
@@ -73,20 +81,23 @@ public:
 
 	// --- tiles ---
 
-	int numTiles() const { return (int)tiles.size() / SMALL_TILE_SIZE; }
+	int numTiles() const
+	{
+		return (int)tiles.size() / SMALL_TILE_SIZE;
+	}
 
-	void decodeTile(int index, unsigned char* rgba32x32) const;
-	int addTile(const unsigned char* rgba32x32);
+	void decodeTile(int index, unsigned char *rgba32x32) const;
+	int addTile(const unsigned char *rgba32x32);
 
 	// Fold the paint layers into the tile map, appending the newly created
 	// tiles to the tile storage. Returns true if anything changed.
 	bool bakePaint();
 	// Write the tile storage back to the .smt file(s) and update the tile map
 	// inside the .smf.
-	bool writeTileFiles(const std::string& smfPath);
+	bool writeTileFiles(const std::string &smfPath);
 
-protected:
-	CSmfReadMap* map;
+  protected:
+	CSmfReadMap *map;
 	int tileSize;
 	int tileMapXSize;
 	int tileMapYSize;
@@ -111,7 +122,6 @@ protected:
 
 	float anisotropy;
 
-	inline bool TexSquareInView(int, int);
 };
 
 #endif // __BF_GROUND_TEXTURES_H__

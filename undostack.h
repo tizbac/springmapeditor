@@ -12,8 +12,8 @@
 
 enum EditType {
 	EDIT_HEIGHT = 0, // one float per index, index is a height map entry
-	EDIT_METAL  = 1, // one float per index, index is a metal map entry
-	EDIT_PAINT  = 2  // four floats per index, index is a paint texel
+	EDIT_METAL = 1,  // one float per index, index is a metal map entry
+	EDIT_PAINT = 2   // four floats per index, index is a paint texel
 };
 
 struct Stroke {
@@ -21,23 +21,26 @@ struct Stroke {
 	std::vector<int> index;
 	std::vector<float> oldValue;
 
-	bool empty() const { return index.empty(); }
+	bool empty() const
+	{
+		return index.empty();
+	}
 };
 
 class UndoStack {
-public:
+  public:
 	// A new edit: pushes it onto the undo stack and clears the redo stack.
-	void commit(const Stroke& stroke)
+	void commit(const Stroke &stroke)
 	{
 		if (stroke.empty())
 			return;
 		undo.push_back(stroke);
-	trim();
+		trim();
 		redo.clear();
 	}
 
 	// Used by redo: puts a stroke back on the undo stack without clearing redo.
-	void pushUndo(const Stroke& stroke)
+	void pushUndo(const Stroke &stroke)
 	{
 		if (stroke.empty())
 			return;
@@ -45,7 +48,7 @@ public:
 		trim();
 	}
 
-	void pushRedo(const Stroke& stroke)
+	void pushRedo(const Stroke &stroke)
 	{
 		if (stroke.empty())
 			return;
@@ -54,10 +57,22 @@ public:
 			redo.erase(redo.begin());
 	}
 
-	bool canUndo() const { return !undo.empty(); }
-	bool canRedo() const { return !redo.empty(); }
-	size_t undoSize() const { return undo.size(); }
-	size_t redoSize() const { return redo.size(); }
+	bool canUndo() const
+	{
+		return !undo.empty();
+	}
+	bool canRedo() const
+	{
+		return !redo.empty();
+	}
+	size_t undoSize() const
+	{
+		return undo.size();
+	}
+	size_t redoSize() const
+	{
+		return redo.size();
+	}
 
 	Stroke undoLast()
 	{
@@ -79,7 +94,7 @@ public:
 		redo.clear();
 	}
 
-private:
+  private:
 	static const size_t maxStrokes = 128;
 	std::vector<Stroke> undo;
 	std::vector<Stroke> redo;

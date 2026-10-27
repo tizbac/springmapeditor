@@ -1,114 +1,169 @@
+/*
+ * shader.cxx - OpenGL 3 core profile shader program wrapper.
+ */
 #include "shader.h"
-#include <stdio.h>
-#include <stdlib.h>
-char *file2string(const char *path)
+
+#include <cstdio>
+#include <fstream>
+#include <sstream>
+
+static std::string readFile(const std::string &path)
 {
-	FILE *fd;
-	long len,r;
-	char *str;
-	if (!(fd = fopen(path,"r")))
+	std::ifstream in(path);
+	if (!in)
 	{
-		fprintf(stderr,"Cannot open file %s\n",path);
-		return NULL;
+		fprintf(stderr, "Cannot open shader file %s\n", path.c_str());
+		return std::string();
 	}
-	fseek(fd,0,SEEK_END);
-	len = ftell(fd);
-	printf("Shader %ld bytes\n",len);
-	if(!(str = (char*)malloc((len+1)*sizeof(char))))
+	std::ostringstream ss;
+	ss << in.rdbuf();
+	return ss.str();
+}
+
+static bool shaderStatus(GLuint object)
+{
+	int ok = 0;
+	glGetShaderiv(object, GL_COMPILE_STATUS, &ok);
+	if (!ok)
 	{
-		printf("Cannot allocate memory");
-		fclose(fd);
-		return NULL;
+		char log[2048];
+		glGetShaderInfoLog(object, sizeof(log), nullptr, log);
+		fprintf(stderr, "Shader compile error: %s\n", log);
 	}
-	fseek(fd,0,SEEK_SET);
-	r = fread(str,sizeof(char),len,fd);
-	str[r] = '\0';
-	fclose(fd);
-	return str;
-}
-void PrintLog(GLuint obj)
-{
-	int inlogl = 0;
-	char infoLog[1024];
-	if (glIsShader(obj))
-		glGetShaderInfoLog(obj,1024,&inlogl,infoLog);
-	else
-		glGetProgramInfoLog(obj,1024,&inlogl,infoLog);
-	if (inlogl > 0)
-		printf("%s\n",infoLog);
+	return ok != 0;
 }
 
-void shader::createfromfiles(const char * fsfile,const char * vsfile)
+static bool programStatus(GLuint program)
 {
-	const char * fss = file2string(fsfile);
-	const char * vss = file2string(vsfile);
-	if (GLEW_VERSION_2_0)
-		printf("OpenGL 2.0\n");
-	else
-		printf("DANGER: No OpenGL 2.0\n");
-	this->vs = glCreateShader(GL_VERTEX_SHADER);
-	this->fs = glCreateShader(GL_FRAGMENT_SHADER);
-	glShaderSource(this->vs,1,&vss,NULL);
-	glShaderSource(this->fs,1,&fss,NULL);
-	glCompileShader(this->vs);
-	PrintLog(this->vs);
-	glCompileShader(this->fs);
-		PrintLog(this->fs);
-	this->program = glCreateProgram();
-	glAttachShader(this->program,this->vs);
-	glAttachShader(this->program,this->fs);
-	glLinkProgram(this->program);
-	PrintLog(this->program);
-	glUseProgram(0);
+	int ok = 0;
+	glGetProgramiv(program, GL_LINK_STATUS, &ok);
+	if (!ok)
+	{
+		char log[2048];
+		glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+		fprintf(stderr, "Shader link error: %s\n", log);
+	}
+	return ok != 0;
 }
-void shader::useshader(void)
+
+Shader::~Shader()
 {
-	glUseProgram(this->program);
-#ifdef SHADER_DEBUG
-	int linked = 0;
-	glGetProgramiv(this->program, GL_LINK_STATUS, &linked);
-	printf("shader program=%u isProgram=%d linked=%d error=%d\n", this->program, glIsProgram(this->program), linked, (int)glGetError());
-#endif
+	if (program)
+		glDeleteProgram(program);
 }
-void shader::setuniformfloat(const char *uniname,float value)
+
+bool Shader::createFromSources(const std::string &vertexSource, const std::string &fragmentSource)
 {
-	glUseProgram(this->program);
-	GLint loc;
-	loc = glGetUniformLocation(this->program,uniname);
-	glUniform1f(loc,value);
-	//glUseProgram(0);
+	if (vertexSource.empty() || fragmentSource.empty())
+		return false;
+
+	if (program)
+	{
+		glDeleteProgram(program);
+		program = 0;
+		uniforms.clear();
+	}
+
+	const char *vsSource = vertexSource.c_str();
+	const char *fsSource = fragmentSource.c_str();
+
+	GLuint vs = glCreateShader(GL_VERTEX_SHADER);
+	glShaderSource(vs, 1, &vsSource, nullptr);
+	glCompileShader(vs);
+	if (!shaderStatus(vs))
+	{
+		glDeleteShader(vs);
+		return false;
+	}
+
+	GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+	glShaderSource(fs, 1, &fsSource, nullptr);
+	glCompileShader(fs);
+	if (!shaderStatus(fs))
+	{
+		glDeleteShader(vs);
+		glDeleteShader(fs);
+		return false;
+	}
+
+	program = glCreateProgram();
+	glAttachShader(program, vs);
+	glAttachShader(program, fs);
+	glLinkProgram(program);
+
+	glDeleteShader(vs);
+	glDeleteShader(fs);
+
+	return programStatus(program);
 }
-void shader::setuniform2to4f(const char *uniname,float* value)
-{
-	glUseProgram(this->program);
-	GLint loc;
-	loc = glGetUniformLocation(this->program,uniname);
-	/*if (sizeof(value) == 1)
-		glUniform1f(loc,value[0]);
-	if (sizeof(value) == 2)
-		glUniform2f(loc,value[0],value[1]);
-	if (sizeof(value) == 3)
-		glUniform3f(loc,value[0],value[1],value[2]);
-	if (sizeof(value) == 4)
-		glUniform4f(loc,value[0],value[1],value[2],value[3]); EPIC FAIL*/
-	glUseProgram(0);
 
+bool Shader::createFromFiles(const std::string &vertexFile, const std::string &fragmentFile)
+{
+	return createFromSources(readFile(vertexFile), readFile(fragmentFile));
 }
-void shader::setuniformsampler(const char *uniname,int value)
-{
-	glUseProgram(this->program);
-	GLint loc;
-	loc = glGetUniformLocation(this->program,uniname);
-	glUniform1i(loc,value);
 
+void Shader::use() const
+{
+	if (program)
+		glUseProgram(program);
 }
-void shader::setuniformint(const char *uniname,int value)
+
+void Shader::set(const char *name, float value)
 {
-    glUseProgram(this->program);
-	GLint loc;
-	loc = glGetUniformLocation(this->program,uniname);
-	glUniform1i(loc,value);
+	std::map<std::string, GLint>::iterator it = uniforms.find(name);
+	if (it == uniforms.end())
+	{
+		GLint loc = glGetUniformLocation(program, name);
+		it = uniforms.insert(std::make_pair(name, loc)).first;
+	}
+	if (it->second >= 0)
+		glUniform1f(it->second, value);
+}
 
+void Shader::set(const char *name, int value)
+{
+	std::map<std::string, GLint>::iterator it = uniforms.find(name);
+	if (it == uniforms.end())
+	{
+		GLint loc = glGetUniformLocation(program, name);
+		it = uniforms.insert(std::make_pair(name, loc)).first;
+	}
+	if (it->second >= 0)
+		glUniform1i(it->second, value);
+}
 
+void Shader::set(const char *name, float x, float y)
+{
+	std::map<std::string, GLint>::iterator it = uniforms.find(name);
+	if (it == uniforms.end())
+	{
+		GLint loc = glGetUniformLocation(program, name);
+		it = uniforms.insert(std::make_pair(name, loc)).first;
+	}
+	if (it->second >= 0)
+		glUniform2f(it->second, x, y);
+}
 
+void Shader::set(const char *name, float x, float y, float z)
+{
+	std::map<std::string, GLint>::iterator it = uniforms.find(name);
+	if (it == uniforms.end())
+	{
+		GLint loc = glGetUniformLocation(program, name);
+		it = uniforms.insert(std::make_pair(name, loc)).first;
+	}
+	if (it->second >= 0)
+		glUniform3f(it->second, x, y, z);
+}
+
+void Shader::set(const char *name, const Mat4 &matrix)
+{
+	std::map<std::string, GLint>::iterator it = uniforms.find(name);
+	if (it == uniforms.end())
+	{
+		GLint loc = glGetUniformLocation(program, name);
+		it = uniforms.insert(std::make_pair(name, loc)).first;
+	}
+	if (it->second >= 0)
+		glUniformMatrix4fv(it->second, 1, GL_FALSE, matrix.m);
 }

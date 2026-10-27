@@ -118,7 +118,7 @@ unsigned char *CSmfReadMap::GetInfoMap (const std::string& name, MapBitmapInfo* 
 	return nullptr;
 }
 
-void CSmfReadMap::FreeInfoMap (const std::string& name, unsigned char *data)
+void CSmfReadMap::FreeInfoMap (const std::string&, unsigned char *data)
 {
 	delete[] data;
 }

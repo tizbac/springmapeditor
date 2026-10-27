@@ -1,15 +1,16 @@
+/*
+ * engine.cxx - SDL window, event handling and the orbit camera.
+ */
 #include "engine.h"
-#include <cmath>
+
 #include <cstdio>
-bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
+
+bool engine::Init3d(int width, int height, int bpp, bool fullscreen)
 {
-	
-	//this->world = dWorldCreate();
-	this->bpp = bpp;
-	this->height = height;
 	this->width = width;
+	this->height = height;
+	this->bpp = bpp;
 	this->fullscreen = fullscreen;
-	this->quit = false;
 	this->pivx = 0;
 	this->pivy = 0;
 	this->pivz = 0;
@@ -21,25 +22,22 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 		return false;
 	}
 
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+	// Core profile: no display lists, no glBegin, no fixed function lighting.
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
-	SDL_GL_SetAttribute(SDL_GL_RED_SIZE,5);
-	SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE,5);
-	SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE,5);
-	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE,16);
-	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER,1);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
-	this->screen = SDL_CreateWindow("Spring Map Editor", this->width, this->height,
-	                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-	if (this->screen == NULL)
+	this->screen = SDL_CreateWindow("Spring Map Editor", width, height, SDL_WINDOW_OPENGL);
+	if (!this->screen)
 	{
 		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
 		return false;
 	}
 
 	this->context = SDL_GL_CreateContext(this->screen);
-	if (this->context == NULL)
+	if (this->context == nullptr)
 	{
 		fprintf(stderr, "SDL_GL_CreateContext failed: %s\n", SDL_GetError());
 		return false;
@@ -51,364 +49,106 @@ bool engine::Init3d(int width,int height,int bpp,bool fullscreen)
 		SDL_SetWindowFullscreen(this->screen, true);
 
 	glewExperimental = GL_TRUE;
-	GLenum glewStatus = glewInit();
-	if (glewStatus != GLEW_OK)
+	if (glewInit() != GLEW_OK)
 	{
-		fprintf(stderr, "glewInit failed: %s\n", glewGetErrorString(glewStatus));
+		fprintf(stderr, "glewInit failed: %s\n", glewGetErrorString(glewInit()));
 		return false;
 	}
-	// GLEW can leave a benign GL_INVALID_ENUM behind on core-ish contexts.
-	while (glGetError() != GL_NO_ERROR) {}
-	glShadeModel(GL_SMOOTH);
-	glEnable(GL_DEPTH_TEST);//Abilita il controllo della profondità
-	//glEnable(GL_CULL_FACE);//Abilita il rendering solo per le facce frontali
-	glCullFace(GL_BACK);
-	//glEnable(GL_COLOR_MATERIAL);//Abilita i materiali personalizzati
-	glClearColor(0.0,0.0,0.0,1);
-	glEnable(GL_LIGHTING);//Illuminazione
-	glDisable(GL_TEXTURE_2D);//texture
-	glEnable(GL_NORMALIZE);
-	glShadeModel(GL_SMOOTH);//Goraud shading
-	GLfloat h = (GLfloat) this->height / (GLfloat) this->width;
-	glViewport(0,0,this->width,this->height);
-	glGetIntegerv(GL_VIEWPORT,this->view);
-	glMatrixMode(GL_PROJECTION);//Imposta la proiezione
-	glLoadIdentity();
-
-	gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,1000.0f);
-	this->up = false;
-	this->down = false;
-	this->left = false;
-	this->right = false;
-	this->ctrl = false;
-	this->shift = false;
-	this->mouseleft = false;
-	this->mouseright = false;
-	glMatrixMode(GL_MODELVIEW);
-	glGetDoublev(GL_PROJECTION_MATRIX, this->proj);
-	glHint(GL_PERSPECTIVE_CORRECTION_HINT,GL_NICEST);
-	//glEnable(GL_LINE_SMOOTH);
-    glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
-    glPolygonOffset(-3.0f, -3.0f);
-	glLoadIdentity();
-	return true;
-}
-void engine::ExtractFrustum()
-{
-	float   proj[16];
-	float   modl[16];
-	float   clip[16];
-	float   t;
-
-	/* Get the current PROJECTION matrix from OpenGL */
-	glGetFloatv( GL_PROJECTION_MATRIX, proj );
-
-	/* Get the current MODELVIEW matrix from OpenGL */
-	glGetFloatv( GL_MODELVIEW_MATRIX, modl );
-
-	/* Combine the two matrices (multiply projection by modelview) */
-	clip[ 0] = modl[ 0] * proj[ 0] + modl[ 1] * proj[ 4] + modl[ 2] * proj[ 8] + modl[ 3] * proj[12];
-	clip[ 1] = modl[ 0] * proj[ 1] + modl[ 1] * proj[ 5] + modl[ 2] * proj[ 9] + modl[ 3] * proj[13];
-	clip[ 2] = modl[ 0] * proj[ 2] + modl[ 1] * proj[ 6] + modl[ 2] * proj[10] + modl[ 3] * proj[14];
-	clip[ 3] = modl[ 0] * proj[ 3] + modl[ 1] * proj[ 7] + modl[ 2] * proj[11] + modl[ 3] * proj[15];
-
-	clip[ 4] = modl[ 4] * proj[ 0] + modl[ 5] * proj[ 4] + modl[ 6] * proj[ 8] + modl[ 7] * proj[12];
-	clip[ 5] = modl[ 4] * proj[ 1] + modl[ 5] * proj[ 5] + modl[ 6] * proj[ 9] + modl[ 7] * proj[13];
-	clip[ 6] = modl[ 4] * proj[ 2] + modl[ 5] * proj[ 6] + modl[ 6] * proj[10] + modl[ 7] * proj[14];
-	clip[ 7] = modl[ 4] * proj[ 3] + modl[ 5] * proj[ 7] + modl[ 6] * proj[11] + modl[ 7] * proj[15];
-
-	clip[ 8] = modl[ 8] * proj[ 0] + modl[ 9] * proj[ 4] + modl[10] * proj[ 8] + modl[11] * proj[12];
-	clip[ 9] = modl[ 8] * proj[ 1] + modl[ 9] * proj[ 5] + modl[10] * proj[ 9] + modl[11] * proj[13];
-	clip[10] = modl[ 8] * proj[ 2] + modl[ 9] * proj[ 6] + modl[10] * proj[10] + modl[11] * proj[14];
-	clip[11] = modl[ 8] * proj[ 3] + modl[ 9] * proj[ 7] + modl[10] * proj[11] + modl[11] * proj[15];
-
-	clip[12] = modl[12] * proj[ 0] + modl[13] * proj[ 4] + modl[14] * proj[ 8] + modl[15] * proj[12];
-	clip[13] = modl[12] * proj[ 1] + modl[13] * proj[ 5] + modl[14] * proj[ 9] + modl[15] * proj[13];
-	clip[14] = modl[12] * proj[ 2] + modl[13] * proj[ 6] + modl[14] * proj[10] + modl[15] * proj[14];
-	clip[15] = modl[12] * proj[ 3] + modl[13] * proj[ 7] + modl[14] * proj[11] + modl[15] * proj[15];
-
-	/* Extract the numbers for the RIGHT plane */
-	frustum[0][0] = clip[ 3] - clip[ 0];
-	frustum[0][1] = clip[ 7] - clip[ 4];
-	frustum[0][2] = clip[11] - clip[ 8];
-	frustum[0][3] = clip[15] - clip[12];
-
-	/* Normalize the result */
-	t = sqrt( frustum[0][0] * frustum[0][0] + frustum[0][1] * frustum[0][1] + frustum[0][2] * frustum[0][2] );
-	frustum[0][0] /= t;
-	frustum[0][1] /= t;
-	frustum[0][2] /= t;
-	frustum[0][3] /= t;
-
-	/* Extract the numbers for the LEFT plane */
-	frustum[1][0] = clip[ 3] + clip[ 0];
-	frustum[1][1] = clip[ 7] + clip[ 4];
-	frustum[1][2] = clip[11] + clip[ 8];
-	frustum[1][3] = clip[15] + clip[12];
-
-	/* Normalize the result */
-	t = sqrt( frustum[1][0] * frustum[1][0] + frustum[1][1] * frustum[1][1] + frustum[1][2] * frustum[1][2] );
-	frustum[1][0] /= t;
-	frustum[1][1] /= t;
-	frustum[1][2] /= t;
-	frustum[1][3] /= t;
-
-	/* Extract the BOTTOM plane */
-	frustum[2][0] = clip[ 3] + clip[ 1];
-	frustum[2][1] = clip[ 7] + clip[ 5];
-	frustum[2][2] = clip[11] + clip[ 9];
-	frustum[2][3] = clip[15] + clip[13];
-
-	/* Normalize the result */
-	t = sqrt( frustum[2][0] * frustum[2][0] + frustum[2][1] * frustum[2][1] + frustum[2][2] * frustum[2][2] );
-	frustum[2][0] /= t;
-	frustum[2][1] /= t;
-	frustum[2][2] /= t;
-	frustum[2][3] /= t;
-
-	/* Extract the TOP plane */
-	frustum[3][0] = clip[ 3] - clip[ 1];
-	frustum[3][1] = clip[ 7] - clip[ 5];
-	frustum[3][2] = clip[11] - clip[ 9];
-	frustum[3][3] = clip[15] - clip[13];
-
-	/* Normalize the result */
-	t = sqrt( frustum[3][0] * frustum[3][0] + frustum[3][1] * frustum[3][1] + frustum[3][2] * frustum[3][2] );
-	frustum[3][0] /= t;
-	frustum[3][1] /= t;
-	frustum[3][2] /= t;
-	frustum[3][3] /= t;
-
-	/* Extract the FAR plane */
-	frustum[4][0] = clip[ 3] - clip[ 2];
-	frustum[4][1] = clip[ 7] - clip[ 6];
-	frustum[4][2] = clip[11] - clip[10];
-	frustum[4][3] = clip[15] - clip[14];
-
-	/* Normalize the result */
-	t = sqrt( frustum[4][0] * frustum[4][0] + frustum[4][1] * frustum[4][1] + frustum[4][2] * frustum[4][2] );
-	frustum[4][0] /= t;
-	frustum[4][1] /= t;
-	frustum[4][2] /= t;
-	frustum[4][3] /= t;
-
-	/* Extract the NEAR plane */
-	frustum[5][0] = clip[ 3] + clip[ 2];
-	frustum[5][1] = clip[ 7] + clip[ 6];
-	frustum[5][2] = clip[11] + clip[10];
-	frustum[5][3] = clip[15] + clip[14];
-
-	/* Normalize the result */
-	t = sqrt( frustum[5][0] * frustum[5][0] + frustum[5][1] * frustum[5][1] + frustum[5][2] * frustum[5][2] );
-	frustum[5][0] /= t;
-	frustum[5][1] /= t;
-	frustum[5][2] /= t;
-	frustum[5][3] /= t;
-}
-bool engine::pointinview( float x, float y, float z )
-{
-	int p;
-
-	for( p = 0; p < 6; p++ )
-		if( frustum[p][0] * x + frustum[p][1] * y + frustum[p][2] * z + frustum[p][3] <= 0 )
-			return false;
-	return true;
-}
-void engine::clearscreen(float r,float g,float b,float a)
-{
-	this->cleartime = SDL_GetTicks();
-	glClearColor(r,g,b,a);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
-
-    this->mouserelx = 0;
-    this->mouserely = 0;
-
-	while ( SDL_PollEvent(&this->ev)){
-        switch (this->ev.type)
-        {
-            case SDL_EVENT_MOUSE_MOTION:
-                this->mousex = (int)ev.motion.x;
-                this->mousey = (int)ev.motion.y;
-                this->mouserelx = (int)ev.motion.xrel;
-                this->mouserely = (int)ev.motion.yrel;
-                break;
-
-            case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            case SDL_EVENT_MOUSE_BUTTON_UP:
-                if (ev.button.button == SDL_BUTTON_LEFT)
-                    this->mouseleft = ev.button.down;
-                else if (ev.button.button == SDL_BUTTON_RIGHT)
-                    this->mouseright = ev.button.down;
-                else if (ev.button.button == SDL_BUTTON_MIDDLE)
-                    this->mousecenter = ev.button.down;
-                break;
-
-            case SDL_EVENT_MOUSE_WHEEL:
-                this->wup = ev.wheel.y > 0;
-                this->wdown = ev.wheel.y < 0;
-                break;
-
-            case SDL_EVENT_KEY_DOWN:
-            case SDL_EVENT_KEY_UP:
-                switch (ev.key.scancode) {
-                case SDL_SCANCODE_LEFT:
-                    this->left = ev.key.down;
-                    break;
-                case SDL_SCANCODE_RIGHT:
-                    this->right = ev.key.down;
-                    break;
-                case SDL_SCANCODE_UP:
-                    this->up = ev.key.down;
-                    break;
-                case SDL_SCANCODE_DOWN:
-                    this->down = ev.key.down;
-                    break;
-                case SDL_SCANCODE_LCTRL:
-                case SDL_SCANCODE_RCTRL:
-                    this->ctrl = ev.key.down;
-                    break;
-                case SDL_SCANCODE_LSHIFT:
-                case SDL_SCANCODE_RSHIFT:
-                    this->shift = ev.key.down;
-                    break;
-                default:
-                    break;
-                }
-                break;
-
-            case SDL_EVENT_QUIT:
-                this->quit = true;
-                break;
-
-            default:
-                break;
-        }
+	// GLEW can leave a benign GL_INVALID_ENUM behind on core contexts.
+	while (glGetError() != GL_NO_ERROR)
+	{
 	}
 
-}
-bool engine::getkey(SDL_Scancode key)
-{
+	if (!GLEW_VERSION_3_3)
+	{
+		fprintf(stderr, "OpenGL 3.3 is required for the core profile renderer\n");
+		return false;
+	}
 
-	this->keys = SDL_GetKeyboardState(NULL);
-	return this->keys[key];
+	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	glClearDepth(1.0f);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LEQUAL);
+
+	return true;
 }
-void engine::display(void)
-{
-	SDL_GL_SwapWindow(screen);
-	this->rendertime = SDL_GetTicks()-this->cleartime;
-}
-bool engine::Terminate(void)
+
+bool engine::Terminate()
 {
 	if (this->context)
 	{
 		SDL_GL_DestroyContext(this->context);
-		this->context = NULL;
+		this->context = nullptr;
 	}
 	if (this->screen)
 	{
 		SDL_DestroyWindow(this->screen);
-		this->screen = NULL;
+		this->screen = nullptr;
 	}
 	SDL_Quit();
 	return true;
 }
-bool engine::ToggleFullScreen(void)
+
+bool engine::ToggleFullScreen()
 {
-	if (this->screen == NULL)
+	if (this->screen == nullptr)
 		return false;
 
 	this->fullscreen = !this->fullscreen;
 	SDL_SetWindowFullscreen(this->screen, this->fullscreen);
 	return true;
 }
-float engine::getfps(void)
+
+float engine::getfps()
 {
-	float tmp = 0.0;
-	tmp = (this->rendertime > 0) ? 1000.0f / rendertime : 0.0f;
-	return tmp;
-}
-void engine::PushTransform(float x,float y,float z,float rx,float ry,float rz)
-{
-
-
-		glPushMatrix();
-		glTranslatef(x,y,z);
-		glRotatef(rx,1,0,0);
-		glRotatef(ry,0,1,0);
-		glRotatef(rz,0,0,1);
-
-
-}
-void engine::Transform(float x,float y,float z,float rx,float ry,float rz)
-{
-
-
-
-		glTranslatef(x,y,z);
-		glRotatef(rx,1,0,0);
-		glRotatef(ry,0,1,0);
-		glRotatef(rz,0,0,1);
-
-
-}
-void engine::PopTransform()
-{
-  glPopMatrix();
-
-}
-void engine::SetCameraPos(float x,float y,float z)
-{
-    SetCamera(x,y,z,this->camrx,this->camry,this->camrz,this->camdist);
+	return this->rendertime > 0 ? 1000.0f / (float)this->rendertime : 0.0f;
 }
 
-// Orbit camera: the world is rotated by (rx,ry,rz) and then pushed `dist`
-// units away from the pivot, so rotating spins the view around the pivot and
-// zooming moves along the view axis.
-void engine::SetCamera(float px,float py,float pz,float rx,float ry,float rz,float dist)
+bool engine::getkey(SDL_Scancode key)
 {
-    this->pivx = px;
-    this->pivy = py;
-    this->pivz = pz;
-    this->camrx = rx;
-    this->camry = ry;
-    this->camrz = rz;
-    if (dist < 0.2f)
-        dist = 0.2f;
-    this->camdist = dist;
-
-    // Eye position, used by the HUD only.
-    float vx = cos(rx) * sin(ry);
-    float vy = -sin(rx);
-    float vz = cos(rx) * cos(ry);
-    this->camx = px + dist * (vx * cos(rz) + vy * sin(rz));
-    this->camy = py + dist * (-vx * sin(rz) + vy * cos(rz));
-    this->camz = pz + dist * vz;
-
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-	gluPerspective(45.0f,(GLfloat)this->width/(GLfloat)this->height,0.1f,2000.0f);
-    glTranslatef(0.0,0.0,-dist);
-    glRotatef(this->camrx,1.0,0.0,0.0);
-    glRotatef(this->camry,0.0,1.0,0.0);
-    glRotatef(this->camrz,0.0,0.0,1.0);
-    glTranslatef(-px,-py,-pz);
-    glGetDoublev(GL_PROJECTION_MATRIX, this->proj);
-    glMatrixMode(GL_MODELVIEW);
+	return SDL_GetKeyboardState(nullptr)[key];
 }
 
-void engine::Zoom(float amount)
+bool engine::getwup()
 {
-    float dist = camdist * amount;
-    if (dist < 0.2f)
-        dist = 0.2f;
-    if (dist > 500.0f)
-        dist = 500.0f;
-    SetCamera(pivx,pivy,pivz,camrx,camry,camrz,dist);
+	if (this->wup)
+	{
+		this->wup = false;
+		return true;
+	}
+	return false;
 }
 
-void engine::SetCameraRotation(float x,float y,float z)
+bool engine::getwdown()
 {
-    SetCamera(pivx,pivy,pivz,x,y,z,camdist);
+	if (this->wdown)
+	{
+		this->wdown = false;
+		return true;
+	}
+	return false;
+}
+
+bool engine::getkeydown(SDL_Scancode key)
+{
+	if (key < 0 || key >= SDL_SCANCODE_COUNT)
+		return false;
+	if (this->keyPressed[key])
+	{
+		this->keyPressed[key] = false;
+		return true;
+	}
+	return false;
+}
+
+bool engine::getmousedown()
+{
+	if (this->mousedown)
+	{
+		this->mousedown = false;
+		return true;
+	}
+	return false;
 }
 
 int engine::GetMouseX()
@@ -419,41 +159,233 @@ int engine::GetMouseY()
 {
 	return this->mousey;
 }
-void engine::OrthoMode()
+
+void engine::clearscreen(float r, float g, float b, float a)
 {
-   glMatrixMode(GL_PROJECTION);
-   glLoadIdentity();
-  gluOrtho2D(0,this->width,0,this->height);
-  glMatrixMode(GL_MODELVIEW);
-  glDisable(GL_LIGHTING);
-  ExtractFrustum();
-}
-void engine::NormalMode()
-{
- glEnable(GL_LIGHTING);
-  SetCamera(pivx,pivy,pivz,camrx,camry,camrz,camdist);
-  ExtractFrustum();
+	this->cleartime = SDL_GetTicks();
+
+	glClearColor(r, g, b, a);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+	this->mouserelx = 0;
+	this->mouserely = 0;
+
+	SDL_Event ev;
+	while (SDL_PollEvent(&ev))
+	{
+		switch (ev.type)
+		{
+		case SDL_EVENT_MOUSE_MOTION:
+			this->mousex = (int)ev.motion.x;
+			this->mousey = (int)ev.motion.y;
+			this->mouserelx = (int)ev.motion.xrel;
+			this->mouserely = (int)ev.motion.yrel;
+			break;
+
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP:
+			if (ev.button.button == SDL_BUTTON_LEFT)
+			{
+				this->mouseleft = ev.button.down;
+				if (ev.button.down)
+					this->mousedown = true;
+			} else if (ev.button.button == SDL_BUTTON_RIGHT)
+				this->mouseright = ev.button.down;
+			else if (ev.button.button == SDL_BUTTON_MIDDLE)
+				this->mousecenter = ev.button.down;
+			break;
+
+		case SDL_EVENT_MOUSE_WHEEL:
+			this->wup = ev.wheel.y > 0;
+			this->wdown = ev.wheel.y < 0;
+			break;
+
+		case SDL_EVENT_KEY_DOWN:
+			if (!ev.key.repeat && ev.key.scancode < SDL_SCANCODE_COUNT)
+				this->keyPressed[ev.key.scancode] = true;
+			// fall through
+		case SDL_EVENT_KEY_UP:
+			switch (ev.key.scancode)
+			{
+			case SDL_SCANCODE_LEFT:
+				this->left = ev.key.down;
+				break;
+			case SDL_SCANCODE_RIGHT:
+				this->right = ev.key.down;
+				break;
+			case SDL_SCANCODE_UP:
+				this->up = ev.key.down;
+				break;
+			case SDL_SCANCODE_DOWN:
+				this->down = ev.key.down;
+				break;
+			case SDL_SCANCODE_LCTRL:
+			case SDL_SCANCODE_RCTRL:
+				this->ctrl = ev.key.down;
+				break;
+			case SDL_SCANCODE_LSHIFT:
+			case SDL_SCANCODE_RSHIFT:
+				this->shift = ev.key.down;
+				break;
+			default:
+				break;
+			}
+			break;
+
+		case SDL_EVENT_QUIT:
+			this->quit = true;
+			break;
+
+		default:
+			break;
+		}
+	}
 }
 
-// 2D screen space overlay for the HUD and the texture browser.
-void engine::OverlayBegin()
+void engine::setBarHeight(int pixels)
 {
-  glMatrixMode(GL_PROJECTION);
-  glLoadIdentity();
-  gluOrtho2D(0,this->width,0,this->height);
-  glMatrixMode(GL_MODELVIEW);
-  glLoadIdentity();
-  glDisable(GL_DEPTH_TEST);
-  glDisable(GL_LIGHTING);
-  glEnable(GL_BLEND);
-  glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+	if (pixels < 0)
+		pixels = 0;
+	if (pixels > this->height)
+		pixels = this->height;
+	this->barHeight = pixels;
 }
 
-void engine::OverlayEnd()
+void engine::viewport3D() const
 {
-  glEnable(GL_DEPTH_TEST);
-  glEnable(GL_LIGHTING);
-  glDisable(GL_BLEND);
-  SetCamera(pivx,pivy,pivz,camrx,camry,camrz,camdist);
+	int h = this->height - this->barHeight;
+	if (h < 1)
+		h = 1;
+	glViewport(0, this->barHeight, this->width, h);
 }
 
+void engine::viewportBar() const
+{
+	glViewport(0, 0, this->width, this->barHeight);
+}
+
+void engine::updateCamera()
+{
+	float aspect = (float)this->width /
+	               (float)(this->height - this->barHeight > 0 ? this->height - this->barHeight : 1);
+
+	projection = Mat4::perspective(60.0f, aspect, 0.1f, 2000.0f);
+
+	Mat4 rotation = Mat4::multiply(Mat4::rotateDeg(camrx, 1.0f, 0.0f, 0.0f),
+	                               Mat4::multiply(Mat4::rotateDeg(camry, 0.0f, 1.0f, 0.0f),
+	                                              Mat4::rotateDeg(camrz, 0.0f, 0.0f, 1.0f)));
+
+	view = Mat4::multiply(Mat4::translate(0.0f, 0.0f, -camdist),
+	                      Mat4::multiply(rotation, Mat4::translate(-pivx, -pivy, -pivz)));
+
+	vp = Mat4::multiply(projection, view);
+	invVP = vp.inverse();
+
+	// Eye position, used by the HUD.
+	float ex, ey, ez;
+	Mat4 invView = view.inverse();
+	invView.transformPoint(0.0f, 0.0f, 0.0f, ex, ey, ez);
+	camx = ex;
+	camy = ey;
+	camz = ez;
+
+	// Frustum planes. A clip space plane a (inside is a . clip <= 0) becomes the
+	// world plane (VP^T a) . point = 0. Store it negated so that "inside" is the
+	// positive side, which is what the culling tests expect.
+	static const float clipPlanes[6][4] = {
+	    {1.0f, 0.0f, 0.0f, -1.0f},  // right
+	    {-1.0f, 0.0f, 0.0f, -1.0f}, // left
+	    {0.0f, 1.0f, 0.0f, -1.0f},  // top
+	    {0.0f, -1.0f, 0.0f, -1.0f}, // bottom
+	    {0.0f, 0.0f, 1.0f, -1.0f},  // far
+	    {0.0f, 0.0f, -1.0f, -1.0f}, // near
+	};
+
+	for (int p = 0; p < 6; ++p)
+	{
+		for (int i = 0; i < 4; ++i)
+		{
+			float sum = 0.0f;
+			for (int k = 0; k < 4; ++k)
+				sum += vp.m[k * 4 + i] * clipPlanes[p][k];
+			frustum[p][i] = -sum;
+		}
+	}
+
+	for (int p = 0; p < 6; ++p)
+	{
+		float len = sqrtf(frustum[p][0] * frustum[p][0] + frustum[p][1] * frustum[p][1] +
+		                  frustum[p][2] * frustum[p][2]);
+		if (len > 1e-8f)
+		{
+			frustum[p][0] /= len;
+			frustum[p][1] /= len;
+			frustum[p][2] /= len;
+			frustum[p][3] /= len;
+		}
+	}
+}
+
+bool engine::pointInView(float x, float y, float z) const
+{
+	for (int p = 0; p < 6; ++p)
+		if (frustum[p][0] * x + frustum[p][1] * y + frustum[p][2] * z + frustum[p][3] <= 0)
+			return false;
+	return true;
+}
+
+bool engine::pickGround(int px, int py, double *ox, double *oy, double *oz) const
+{
+	if (px < 0 || py < 0 || px >= this->width || py >= this->height)
+		return false;
+
+	int gy = this->height - 1 - py; // GL window coordinates, origin bottom left
+	if (gy < this->barHeight)
+		return false;
+
+	float depth = 1.0f;
+	glReadPixels(px, gy, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+
+	int vpW = this->width;
+	int vpH = this->height - this->barHeight;
+	if (vpH < 1)
+		return false;
+
+	float ndcX = 2.0f * (float)px / (float)vpW - 1.0f;
+	float ndcY = 2.0f * (float)(gy - this->barHeight) / (float)vpH - 1.0f;
+
+	if (depth < 1.0f)
+	{
+		float ndcZ = 2.0f * depth - 1.0f;
+		float x, y, z;
+		invVP.transformPoint(ndcX, ndcY, ndcZ, x, y, z);
+		*ox = x;
+		*oy = y;
+		*oz = z;
+		return true;
+	}
+
+	// Nothing was hit: intersect the ray with the ground plane y = 0.
+	float p0x, p0y, p0z, p1x, p1y, p1z;
+	invVP.transformPoint(ndcX, ndcY, -1.0f, p0x, p0y, p0z);
+	invVP.transformPoint(ndcX, ndcY, 1.0f, p1x, p1y, p1z);
+
+	float dirY = p1y - p0y;
+	if (std::fabs(dirY) < 1e-9f)
+		return false;
+
+	float t = -p0y / dirY;
+	if (t < 0.0f)
+		return false;
+
+	*ox = p0x + (p1x - p0x) * t;
+	*oy = 0.0;
+	*oz = p0z + (p1z - p0z) * t;
+	return true;
+}
+
+void engine::display()
+{
+	SDL_GL_SwapWindow(this->screen);
+	this->rendertime = SDL_GetTicks() - this->cleartime;
+}

@@ -21,17 +21,17 @@ if(FREEIMAGE_LIBRARY)
     add_definitions(-DHAVE_FREEIMAGE)
 endif()
 
-add_subdirectory(ftgl)
-
 add_executable(editor
 
     dxt1.cxx
     engine.cxx
     float3.cpp
-    light.cxx
+    font.cxx
     main.cc
     shader.cxx
+    terrain.cxx
     texturebrowser.cxx
+    ui.cxx
     Map/ReadMap.cpp
     Map/SMF/BFGroundTextures.cpp
     Map/SMF/SmfReadMap.cpp
@@ -43,9 +43,7 @@ target_include_directories(editor PRIVATE
 )
 
 target_link_libraries(editor PRIVATE
-    ftglS
     OpenGL::GL
-    OpenGL::GLU
     GLEW::GLEW
     Freetype::Freetype
     SDL3::SDL3
@@ -55,10 +53,12 @@ if(FREEIMAGE_LIBRARY)
     target_link_libraries(editor PRIVATE ${FREEIMAGE_LIBRARY})
 endif()
 
-# Shaders are loaded relative to the working directory at runtime.
+# The shaders are loaded from the working directory at runtime.
 add_custom_command(TARGET editor POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${CMAKE_CURRENT_SOURCE_DIR}/groundshader.vert
-            ${CMAKE_CURRENT_SOURCE_DIR}/groundshader.frag
+            ${CMAKE_CURRENT_SOURCE_DIR}/ground.vert
+            ${CMAKE_CURRENT_SOURCE_DIR}/ground.frag
+            ${CMAKE_CURRENT_SOURCE_DIR}/flat.vert
+            ${CMAKE_CURRENT_SOURCE_DIR}/flat.frag
             $<TARGET_FILE_DIR:editor>
 )
