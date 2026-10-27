@@ -357,10 +357,20 @@ bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees,
 				if (want > kMaxLod)
 					want = kMaxLod;
 
-				// Flat ground (and flat water bottoms) needs no tessellation, the
-				// same idea the engine uses for flat patches.
-				if (sq.cy1 - sq.cy0 < 0.02f)
-					want = kMaxLod;
+				// Do not tessellate finer than the heights can use: while the
+				// relief of the square is smaller than the world size of one of
+				// its quads, the extra vertices only repeat the same height, so
+				// the square is coarsened (a perfectly flat square ends up as a
+				// single quad, like the engine's flat patches).
+				float relief = sq.cy1 - sq.cy0;
+				while (want < kMaxLod)
+				{
+					int quads = 1024 >> want;
+					float quadWorld = 2.0f / (float)(quads > 0 ? quads : 1);
+					if (relief >= quadWorld * 0.5f)
+						break;
+					++want;
+				}
 			}
 
 			sq.screenSize = size;
