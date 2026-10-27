@@ -19,8 +19,10 @@ const int kMaxLod = 10; // one quad per big square
 // How large a quad should be on screen, in pixels. Used to pick the level of
 // detail of each square.
 const float kTargetQuadPixels = 8.0f;
-// Squares rebuilt per updateLods() call, so a big zoom change does not stall.
+// Squares rebuilt per updateLods() call, plus a vertex budget, so a big zoom
+// change does not stall the frame for seconds.
 const int kRebuildsPerCall = 12;
+const long kVerticesPerCall = 60000;
 // One world unit is 64 map squares, and a map square is 8 elmos, so heights
 // (which are stored in elmos) are divided by this to share the ground plane's
 // scale.
@@ -388,10 +390,17 @@ bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees,
 	          [](const Change &a, const Change &b) { return a.size > b.size; });
 
 	int done = 0;
+	long verts = 0;
 	for (size_t c = 0; c < changes.size(); ++c)
 	{
-		if (done >= kRebuildsPerCall)
+		int quads = 1024 >> changes[c].lod;
+		if (quads < 1)
+			quads = 1;
+		long estimate = (long)quads * quads * 6;
+
+		if (done >= kRebuildsPerCall || (done > 0 && verts + estimate > kVerticesPerCall))
 			break;
+		verts += estimate;
 		int index = changes[c].index;
 		int bx = index % bigX;
 		int by = index / bigX;
