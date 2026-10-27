@@ -82,6 +82,7 @@ enum Action {
 	ACT_VALUE_UP,
 	ACT_BRUSH_SIGN,
 	ACT_BRUSH_APPLY,
+	ACT_VALUE_SLIDER,
 	ACT_MODE_HEIGHT,
 	ACT_MODE_METAL,
 	ACT_MODE_TEXTURE,
@@ -167,6 +168,7 @@ static std::string dialogSizeText = "1024x1024";
 static int newMapUnitsX = 2;
 static int newMapUnitsY = 2;
 static bool sliderIsNewMap = false;
+static bool sliderIsValue = false;
 static const int kMenuHeight = 24;
 
 // Bottom bar layout. The bar is exactly tall enough for the control row and the
@@ -226,7 +228,7 @@ static int mode = MODE_HEIGHT;
 static float paintScale = 1.0f; // map squares per texture texel
 static unsigned char fixedColour[4] = {200, 180, 120, 255};
 
-static bool helpVisible = true;
+static bool helpVisible = false; // the H key (or the Help button) shows the key list
 static bool rectFill = false;
 static bool rectActive = false;
 static double rectAx = 0, rectAz = 0;
@@ -682,6 +684,13 @@ static void applyAt(int x, int y, double w)
 		return;
 	}
 
+	// Paint layers exist for the map squares only (the height map has one more
+	// row and column), so clamp before indexing them.
+	if (x >= gs->mapx || y >= gs->mapy)
+		return;
+	if (!tex)
+		return;
+
 	int bx = x / 128;
 	int by = y / 128;
 	int px = x - bx * 128;
@@ -933,10 +942,10 @@ static void fillRectangle(double ax, double az, double bx, double bz)
 	if (hi < 0.0 || lo > (double)gs->mapx || hiZ < 0.0 || loZ > (double)gs->mapy)
 		return;
 
-	int x0 = (int)std::max(0.0, std::min((double)gs->mapx, lo));
-	int x1 = (int)std::max(0.0, std::min((double)gs->mapx, hi));
-	int y0 = (int)std::max(0.0, std::min((double)gs->mapy, loZ));
-	int y1 = (int)std::max(0.0, std::min((double)gs->mapy, hiZ));
+	int x0 = (int)std::max(0.0, std::min((double)gs->mapx - 1, lo));
+	int x1 = (int)std::max(0.0, std::min((double)gs->mapx - 1, hi));
+	int y0 = (int)std::max(0.0, std::min((double)gs->mapy - 1, loZ));
+	int y1 = (int)std::max(0.0, std::min((double)gs->mapy - 1, hiZ));
 
 	for (int y = y0; y <= y1; ++y)
 		for (int x = x0; x <= x1; ++x)
@@ -1747,6 +1756,21 @@ static void updateSliderFromMouse(int i)
 	float t = ((float)Main->mousex - x0) / (x1 - x0);
 	t = std::max(0.0f, std::min(1.0f, t));
 
+	if (sliderIsValue)
+	{
+		if (brushSetMode)
+		{
+			if (mode == MODE_METAL)
+				setMetal = t;
+			else
+				setHeight = mapMinZ + t * (mapMaxZ - mapMinZ);
+		} else
+		{
+			brushstrength = 0.05f + t * 4.95f;
+		}
+		return;
+	}
+
 	if (sliderIsNewMap)
 	{
 		int v = 1 + (int)(t * 39.0f + 0.5f);
@@ -1795,6 +1819,7 @@ static void drawMapSettings()
 	const float sliderW = 170.0f;
 
 	sliderIsNewMap = false;
+	sliderIsValue = false;
 
 	ui.begin();
 	addPanel(x0, y0, x0 + panelW, y1);
@@ -2062,6 +2087,7 @@ static void drawDialog()
 		{
 			// Width and height, in units of 512 map squares.
 			sliderIsNewMap = true;
+			sliderIsValue = false;
 			for (int i = 0; i < 2; ++i)
 			{
 				float sy = fy0 - 26.0f - (float)i * 44.0f;
@@ -2872,7 +2898,7 @@ static void drawBottomBar()
 
 	// Widths: every panel gets at least the room its controls need, the rest of
 	// the window is shared between them.
-	float minW[6] = {100.0f, 194.0f, 206.0f, 152.0f, 124.0f, 246.0f};
+	float minW[6] = {100.0f, 194.0f, 206.0f, 168.0f, 158.0f, 246.0f};
 	float minSum = 0.0f;
 	for (int i = 0; i < 6; ++i)
 		minSum += minW[i];
@@ -2934,13 +2960,34 @@ static void drawBottomBar()
 	addButton(px + 150, buttonY, 24, buttonH, "F-", false, ACT_FALL_DOWN);
 	addButton(px + 178, buttonY, 24, buttonH, "F+", false, ACT_FALL_UP);
 
-	// Brush strength or set value, and add/subtract.
+	// Brush strength or the value the set mode stamps: a slider plus the mode
+	// and add/subtract toggles.
 	px = panelX[3] + 6.0f;
-	addButton(px, buttonY, 24, buttonH, "-", false, ACT_VALUE_DOWN);
-	addButton(px + 28, buttonY, 24, buttonH, "+", false, ACT_VALUE_UP);
-	addButton(px + 58, buttonY, 44, buttonH, brushSetMode ? "Set" : "Add", brushSetMode,
+	{
+		float v;
+		if (brushSetMode)
+			v = mode == MODE_METAL
+			        ? setMetal
+			        : (mapMaxZ > mapMinZ ? (setHeight - mapMinZ) / (mapMaxZ - mapMinZ) : 0.0f);
+		else
+			v = (brushstrength - 0.05f) / 4.95f;
+		v = std::max(0.0f, std::min(1.0f, v));
+
+		ui.quad(px, buttonY, px + 76, buttonY + buttonH, 0.18f, 0.20f, 0.24f, 1.0f);
+		ui.quad(px, buttonY, px + 76.0f * v, buttonY + buttonH, 0.35f, 0.55f, 0.75f, 1.0f);
+		ui.outline(px, buttonY, px + 76, buttonY + buttonH, 1.0f, 0.4f, 0.45f, 0.5f, 1.0f);
+		ui.addHit(ACT_VALUE_SLIDER, px, buttonY, px + 76, buttonY + buttonH);
+
+		sliderIsValue = true;
+		sliderIsNewMap = false;
+		sliderRect[0][0] = px;
+		sliderRect[0][1] = buttonY;
+		sliderRect[0][2] = px + 76;
+		sliderRect[0][3] = buttonY + buttonH;
+	}
+	addButton(px + 80, buttonY, 44, buttonH, brushSetMode ? "Set" : "Add", brushSetMode,
 	          ACT_BRUSH_APPLY);
-	addButton(px + 106, buttonY, 40, buttonH, brushSubtract ? "-" : "+", brushSubtract,
+	addButton(px + 128, buttonY, 20, buttonH, brushSubtract ? "-" : "+", brushSubtract,
 	          ACT_BRUSH_SIGN);
 
 	// Colour swatch, the three channel sliders and the palette button, all in the
@@ -3068,6 +3115,7 @@ static void drawHelpPanel()
 	    {"F", "fullscreen"},
 	    {"Ctrl+Z", "undo"},
 	    {"Ctrl+Shift+Z", "redo"},
+	    {"H", "show / hide this help"},
 	    {"Esc", "quit"},
 	};
 
@@ -3630,6 +3678,9 @@ int main(int argc, char **argv)
 					doUndo();
 			}
 
+			if (Main->getkeydown(SDL_SCANCODE_H))
+				helpVisible = !helpVisible;
+
 			if (Main->getkeydown(SDL_SCANCODE_ESCAPE))
 				requestQuit();
 			if (Main->getkeydown(SDL_SCANCODE_F))
@@ -3783,6 +3834,11 @@ int main(int argc, char **argv)
 					// empty field keeps the old one.
 					fieldText.clear();
 				}
+			} else if (hit == ACT_VALUE_SLIDER)
+			{
+				sliderIsValue = true;
+				activeSlider = 0;
+				updateSliderFromMouse(0);
 			} else if (hit >= ACT_SLIDER_BASE)
 			{
 				activeSlider = hit - ACT_SLIDER_BASE;
