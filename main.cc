@@ -2243,6 +2243,62 @@ static void createNewMap(const std::string &path, const std::string &sizeText)
 	}
 }
 
+// Writes the map info next to a map: the legacy .smd for old engines and a
+// mapinfo.lua, which is what Recoil reads.
+static void writeMapInfo(const std::string &basePath, const std::string &mapName)
+{
+	{
+		FILE *f = fopen((basePath + ".smd").c_str(), "w");
+		if (f)
+		{
+			fprintf(f,
+			        "[MAP]\n{\n\tDescription=%s;\n\tTidalStrength=%g;\n\tMaxMetal=%g;\n"
+			        "\tGravity=130;\n\tExtractorRadius=500;\n\tMapHardness=100;\n",
+			        mapName.c_str(), infoValues[FIELD_TIDAL], infoValues[FIELD_MAXMETAL]);
+			for (size_t i = 0; i < startPositions.size(); ++i)
+			{
+				fprintf(f, "\t[TEAM%zu]\n\t{\n\t\tStartPosX=%.0f;\n\t\tStartPosZ=%.0f;\n\t}\n", i,
+				        startPositions[i].first, startPositions[i].second);
+			}
+			fprintf(f, "}\n[ATMOSPHERE]\n{\n\tMinWind=%g;\n\tMaxWind=%g;\n}\n",
+			        infoValues[FIELD_MINWIND], infoValues[FIELD_MAXWIND]);
+			if (waterPresent)
+				fprintf(f, "[WATER]\n{\n\tWaterPlaneHeight=%g;\n}\n", waterHeight);
+			fclose(f);
+		}
+	}
+
+	FILE *lua = fopen((basePath + ".mapinfo.lua").c_str(), "w");
+	if (lua)
+	{
+		fprintf(lua, "local mapinfo = {\n");
+		fprintf(lua, "\tname = \"%s\",\n", mapName.c_str());
+		fprintf(lua, "\tdescription = \"%s\",\n", mapName.c_str());
+		fprintf(lua, "\tauthor = \"\",\n");
+		fprintf(lua, "\ttidalStrength = %g,\n", infoValues[FIELD_TIDAL]);
+		fprintf(lua, "\tmaxMetal = %g,\n", infoValues[FIELD_MAXMETAL]);
+		fprintf(lua, "\textractorRadius = 500,\n");
+		fprintf(lua, "\tmapHardness = 100,\n");
+		fprintf(lua, "\tgravity = 130,\n");
+		fprintf(lua, "\tatmosphere = {\n\t\tminWind = %g,\n\t\tmaxWind = %g,\n\t},\n",
+		        infoValues[FIELD_MINWIND], infoValues[FIELD_MAXWIND]);
+		if (waterPresent)
+			fprintf(lua, "\twater = {\n\t\tplaneColor = { 0.0, 0.4, 0.0, 1.0 },\n\t},\n");
+		fprintf(lua, "\tsmf = {\n\t\tminHeight = %g,\n\t\tmaxHeight = %g,\n\t},\n", mapMinZ,
+		        mapMaxZ);
+		if (!startPositions.empty())
+		{
+			fprintf(lua, "\tteams = {\n");
+			for (size_t i = 0; i < startPositions.size(); ++i)
+				fprintf(lua, "\t\t[%zu] = { startPos = { x = %.0f, z = %.0f } },\n", i,
+				        startPositions[i].first, startPositions[i].second);
+			fprintf(lua, "\t},\n");
+		}
+		fprintf(lua, "}\n\nreturn mapinfo\n");
+		fclose(lua);
+	}
+}
+
 static void startExport(const std::string &path)
 {
 	if (!map || !tex)
@@ -2280,37 +2336,51 @@ static void startExport(const std::string &path)
 	const std::string target = path;
 	progressText = "Compressing tiles";
 
-	bool ok = writeMapFiles(target, gs->mapx, gs->mapy, heights, metal, types, colormap, mapMinZ,
+	const bool isArchive =
+	    target.size() > 4 && (target.compare(target.size() - 4, 4, ".sd7") == 0 ||
+	                          target.compare(target.size() - 4, 4, ".sdz") == 0);
+	const std::string base = pathWithoutExtension(target);
+	const std::string outSmf = isArchive ? (base + ".smf") : target;
+
+	bool ok = writeMapFiles(outSmf, gs->mapx, gs->mapy, heights, metal, types, colormap, mapMinZ,
 	                        mapMaxZ, options, [](int done, int total) {
 		                        progressValue =
 		                            0.10f + 0.85f * (total > 0 ? (float)done / (float)total : 0.0f);
 		                        drawProgressFrame();
 	                        });
 
-	if (ok && target.size() > 4 &&
-	    (target.compare(target.size() - 4, 4, ".sd7") == 0 ||
-	     target.compare(target.size() - 4, 4, ".sdz") == 0))
+	if (ok)
+	{
+		// Both a legacy .smd and a mapinfo.lua, so old engines and Recoil load it.
+		std::string infoBase = isArchive ? base : pathWithoutExtension(target);
+		writeMapInfo(infoBase, fileStem(target));
+	}
+
+	if (ok && isArchive)
 	{
 		progressValue = 0.97f;
 		progressText = "Packing archive";
 		drawProgressFrame();
 
-		std::string base = pathWithoutExtension(target);
 		std::string tempSmf = base + ".smf";
 		std::string tempSmt = base + ".smt";
 		std::string tempSmd = base + ".smd";
-		std::string archive = target;
+		std::string tempLua = base + ".mapinfo.lua";
 
-		std::string packed = "/tmp/springmapeditor-export.sd7";
 		std::vector<std::string> files;
 		files.push_back(tempSmf);
 		files.push_back(tempSmt);
 		files.push_back(tempSmd);
+		files.push_back(tempLua);
+
+		std::string packed = "/tmp/springmapeditor-export.sd7";
 		writeArchive(packed, files);
-		rename(packed.c_str(), archive.c_str());
+		rename(packed.c_str(), target.c_str());
+
 		remove(tempSmf.c_str());
 		remove(tempSmt.c_str());
 		remove(tempSmd.c_str());
+		remove(tempLua.c_str());
 	}
 
 	progressValue = 1.0f;
@@ -2815,6 +2885,9 @@ static bool writeArchive(const std::string &archivePath, const std::vector<std::
 			continue;
 
 		std::string name = fileName(files[i]);
+		// The map info has to be called mapinfo.lua inside the archive.
+		if (name.size() > 12 && name.compare(name.size() - 12, 12, ".mapinfo.lua") == 0)
+			name = "mapinfo.lua";
 		fseek(f, 0, SEEK_END);
 		long size = ftell(f);
 		fseek(f, 0, SEEK_SET);
