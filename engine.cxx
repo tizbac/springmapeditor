@@ -30,7 +30,8 @@ bool engine::Init3d(int width, int height, int bpp, bool fullscreen)
 	SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 
-	this->screen = SDL_CreateWindow("Spring Map Editor", width, height, SDL_WINDOW_OPENGL);
+	this->screen = SDL_CreateWindow("Spring Map Editor", width, height,
+	                                SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
 	if (!this->screen)
 	{
 		fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
