@@ -169,9 +169,11 @@ void FlatRenderer::addHit(int id, float x0, float y0, float x1, float y1)
 
 int FlatRenderer::hit(float x, float y) const
 {
-	for (size_t i = 0; i < hits.size(); ++i)
+	// Hit areas are registered in draw order, so the last one registered is the
+	// topmost control and must win over anything drawn below it.
+	for (size_t i = hits.size(); i > 0; --i)
 	{
-		const HitArea &area = hits[i];
+		const HitArea &area = hits[i - 1];
 		if (x >= area.x0 && x <= area.x1 && y >= area.y0 && y <= area.y1)
 			return area.id;
 	}

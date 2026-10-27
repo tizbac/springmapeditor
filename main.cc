@@ -21,7 +21,6 @@
 #include <unistd.h>
 #include <vector>
 
-#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -37,7 +36,10 @@
 #include "Map/SMF/BFGroundTextures.h"
 #include "Map/SMF/SmfReadMap.h"
 #include "Map/SMF/mapfile.h"
+#include "controls.h"
 #include "engine.h"
+#include "filedialog.h"
+#include "fileutils.h"
 #include "font.h"
 #include "mapwriter.h"
 #include "mat4.h"
@@ -51,7 +53,6 @@
 
 enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
 enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3, MODE_START = 4 };
-enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2, PICK_PROJECT = 3, PICK_MAPTEX = 4 };
 
 // Modal dialogs.
 enum Dialog {
@@ -90,10 +91,6 @@ enum Action {
 	ACT_HELP,
 	ACT_DEBUG,
 	ACT_QUIT,
-	ACT_PICKER_PREV,
-	ACT_PICKER_NEXT,
-	ACT_PICKER_UP,
-	ACT_PICKER_CLOSE,
 	ACT_PALETTE_OPEN,
 	ACT_PALETTE_CLOSE,
 	ACT_MENU_FILE,
@@ -115,7 +112,6 @@ enum Action {
 
 	ACT_TEXTURE_BASE = 1000,    // + index in the texture list
 	ACT_COLOUR_BASE = 2000,     // + 0 red, 1 green, 2 blue
-	ACT_PICKER_BASE = 3000,     // + index in the current directory listing
 	ACT_PALETTE_BASE = 10000,   // + index in the colour palette
 	ACT_SLIDER_BASE = 11000,    // + 0 min z, 1 max z, 2 water z
 	ACT_FIELD_BASE = 12000,     // + index in the map info fields
@@ -172,6 +168,15 @@ static int newMapUnitsX = 2;
 static int newMapUnitsY = 2;
 static bool sliderIsNewMap = false;
 static const int kMenuHeight = 24;
+
+// Bottom bar layout. The bar is exactly tall enough for the control row and the
+// two text lines below it, with a small padding above and below.
+static const float kBarMarginY = 4.0f;
+static const float kBarPaddingY = 6.0f;
+static const float kBarButtonH = 32.0f;
+static const float kBarTextBlock = 26.0f;
+static const int kBarHeight =
+    (int)(2.0f * (kBarMarginY + kBarPaddingY) + kBarButtonH + kBarTextBlock);
 
 static const char *modeNames[] = {"height", "metal", "texture", "colour", "startpos"};
 static const char *shapeNames[] = {"circle", "square", "triangle"};
@@ -324,9 +329,7 @@ static bool loadImageRgb(const std::string &path, std::vector<unsigned char> &rg
 static std::string fileStem(const std::string &path);
 static std::string extractArchive(const std::string &archivePath, const std::string &dir);
 
-static int picker = PICK_NONE;
-static std::string pickerDir;
-static int pickerOffset = 0;
+static FileDialog picker;
 
 static volatile sig_atomic_t interrupt_requested = 0;
 
@@ -349,7 +352,7 @@ static int bigSquaresY()
 
 float GetH(CSmfReadMap *m, int x, int y)
 {
-	if (x < 0 || y < 0)
+	if (!m || x < 0 || y < 0)
 		return 0.0;
 	if (x > gs->mapx || y > gs->mapy)
 		return 0.0;
@@ -942,108 +945,31 @@ static void fillRectangle(double ax, double az, double bx, double bz)
 
 // ---------------------------------------------------------------- UI
 
-struct Button {
-	float x, y, w, h;
-	std::string label;
-	bool active;
-	int id;
-};
-
 static std::vector<Button> buttons;
+static int focusedControl = -1;
 
 static Mat4 screenMatrix()
 {
 	return Mat4::ortho(0.0f, (float)Main->width, 0.0f, (float)Main->height, -1.0f, 1.0f);
 }
 
-static void addButton(float x, float y, float w, float h, const char *label, bool active, int id)
+static void addButton(float x, float y, float w, float h, const char *label, bool active, int id,
+                      const ButtonStyle &style = ButtonStyle())
 {
-	Button b;
-	b.x = x;
-	b.y = y;
-	b.w = w;
-	b.h = h;
-	b.label = label ? label : "";
-	b.active = active;
-	b.id = id;
+	Button b(id, Rect(x, y, x + w, y + h), label ? label : "", active, style);
+	b.setFocused(focusedControl == id);
+	b.registerHit(ui);
 	buttons.push_back(b);
-	ui.addHit(id, x, y, x + w, y + h);
 }
 
 static void addPanel(float x0, float y0, float x1, float y1)
 {
-	ui.quad(x0, y0, x1, y1, 0.16f, 0.18f, 0.22f, 1.0f);
-	ui.outline(x0, y0, x1, y1, 1.0f, 0.40f, 0.44f, 0.50f, 1.0f);
-}
-
-static std::vector<std::pair<std::string, bool>> listDirectory(const std::string &dir)
-{
-	std::vector<std::pair<std::string, bool>> entries;
-	DIR *d = opendir(dir.c_str());
-	if (!d)
-		return entries;
-
-	static const char *imageExtensions[] = {".png", ".jpg",  ".jpeg", ".bmp", ".gif",
-	                                        ".tga", ".webp", ".sd7",  ".sdz"};
-
-	struct dirent *ent;
-	while ((ent = readdir(d)) != nullptr)
-	{
-		std::string name = ent->d_name;
-		if (name == "." || name == "..")
-			continue;
-
-		bool isDir = (ent->d_type == DT_DIR);
-		bool isMap = name.size() > 4 && name.compare(name.size() - 4, 4, ".smf") == 0;
-		bool isImage = false;
-		for (const char *ext : imageExtensions)
-		{
-			size_t len = strlen(ext);
-			if (name.size() >= len && name.compare(name.size() - len, len, ext) == 0)
-			{
-				isImage = true;
-				break;
-			}
-		}
-
-		if (isDir || isMap || isImage)
-			entries.push_back(std::make_pair(name, isDir));
-	}
-	closedir(d);
-
-	std::sort(entries.begin(), entries.end(),
-	          [](const std::pair<std::string, bool> &a, const std::pair<std::string, bool> &b) {
-		          if (a.second != b.second)
-			          return a.second > b.second;
-		          return a.first < b.first;
-	          });
-	return entries;
-}
-
-static std::string joinPath(const std::string &a, const std::string &b)
-{
-	if (a.empty())
-		return b;
-	if (a[a.size() - 1] == '/')
-		return a + b;
-	return a + "/" + b;
-}
-
-static std::string dirName(const std::string &path)
-{
-	size_t slash = path.find_last_of('/');
-	if (slash == std::string::npos)
-		return ".";
-	if (slash == 0)
-		return "/";
-	return path.substr(0, slash);
-}
-
-// Base name of a path.
-static std::string fileName(const std::string &path)
-{
-	size_t slash = path.find_last_of('/');
-	return slash == std::string::npos ? path : path.substr(slash + 1);
+	Panel panel(kUiBlockId, Rect(x0, y0, x1, y1));
+	panel.draw(ui);
+	// The panel background itself consumes clicks, so a click that misses a
+	// control cannot fall through to the map or to the panel behind it. Controls
+	// are registered after the panel and therefore win the hit test.
+	panel.registerHit(ui);
 }
 
 // Shortens text until it fits in maxWidth pixels of the small font, so labels
@@ -1058,34 +984,12 @@ static std::string fitText(const std::string &text, float maxWidth)
 	return out + "...";
 }
 
-// Number of directory entries shown at once by the picker panels.
-static const int kPickerRows = 12;
-
-static std::string parentDirectory(const std::string &dir)
-{
-	if (dir.empty() || dir == "." || dir == "/")
-		return std::string();
-	std::string parent = dirName(dir);
-	if (parent == dir)
-		return std::string();
-	return parent;
-}
-
 // ---------------------------------------------------------------- map info
 // The map settings live in the legacy .smd text file next to the .smf:
 //   [MAP] TidalStrength, MaxMetal
 //   [ATMOSPHERE] MinWind, MaxWind
 //   [WATER] WaterPlaneHeight
 // Everything else in that file is left untouched.
-
-static std::string pathWithoutExtension(const std::string &path)
-{
-	size_t dot = path.find_last_of('.');
-	size_t slash = path.find_last_of('/');
-	if (dot == std::string::npos || (slash != std::string::npos && dot < slash))
-		return path;
-	return path.substr(0, dot);
-}
 
 static std::string mapInfoPath()
 {
@@ -1538,17 +1442,14 @@ static void handleAction(int action)
 	switch (action)
 	{
 	case ACT_OPEN_MAP:
-		picker = PICK_MAP;
-		pickerDir = mapDir.empty() ? "." : mapDir;
-		pickerOffset = 0;
+		picker.open(FileDialog::Mode::Map, mapDir.empty() ? "." : mapDir);
 		break;
 	case ACT_SAVE:
 		saveMap();
 		break;
 	case ACT_OPEN_TEXTURES:
-		picker = PICK_TEXTURES;
-		pickerDir = textureDir.empty() ? (mapDir.empty() ? "." : mapDir) : textureDir;
-		pickerOffset = 0;
+		picker.open(FileDialog::Mode::Textures,
+		            textureDir.empty() ? (mapDir.empty() ? "." : mapDir) : textureDir);
 		break;
 	case ACT_SHAPE_CIRCLE:
 		brushShape = BRUSH_CIRCLE;
@@ -1651,27 +1552,6 @@ static void handleAction(int action)
 	case ACT_QUIT:
 		requestQuit();
 		break;
-	case ACT_PICKER_PREV:
-		pickerOffset = std::max(0, pickerOffset - kPickerRows);
-		break;
-	case ACT_PICKER_NEXT: {
-		int count = (int)listDirectory(pickerDir).size();
-		if (pickerOffset + kPickerRows < count)
-			pickerOffset += kPickerRows;
-		break;
-	}
-	case ACT_PICKER_UP: {
-		std::string parent = parentDirectory(pickerDir);
-		if (!parent.empty())
-		{
-			pickerDir = parent;
-			pickerOffset = 0;
-		}
-		break;
-	}
-	case ACT_PICKER_CLOSE:
-		picker = PICK_NONE;
-		break;
 	case ACT_PALETTE_OPEN:
 		paletteVisible = true;
 		break;
@@ -1697,9 +1577,8 @@ static void handleAction(int action)
 		dialogTextActive = true;
 		break;
 	case ACT_OPEN_PROJECT:
-		picker = PICK_PROJECT;
-		pickerDir = projectDir.empty() ? (mapDir.empty() ? "." : mapDir) : projectDir;
-		pickerOffset = 0;
+		picker.open(FileDialog::Mode::Project,
+		            projectDir.empty() ? (mapDir.empty() ? "." : mapDir) : projectDir);
 		break;
 	case ACT_SAVE_PROJECT:
 		if (projectDir.empty())
@@ -1730,9 +1609,7 @@ static void handleAction(int action)
 		dialogMessage = "This replaces all the ground textures. Continue?";
 		break;
 	case ACT_IMPORT_MAP:
-		picker = PICK_MAP;
-		pickerDir = mapDir.empty() ? "." : mapDir;
-		pickerOffset = 0;
+		picker.open(FileDialog::Mode::Map, mapDir.empty() ? "." : mapDir);
 		break;
 	case ACT_EXPORT_MAP:
 		dialog = DLG_EXPORT;
@@ -1811,134 +1688,6 @@ static void applyMapTexture(const std::string &path, bool skipAspectCheck = fals
 	dialogMessage = "Ground texture replaced with " + fileName(path);
 }
 
-static void handlePickerClick(int index)
-{
-	std::vector<std::pair<std::string, bool>> entries = listDirectory(pickerDir);
-	if (index < 0 || index >= (int)entries.size())
-		return;
-
-	const std::string &name = entries[index].first;
-	bool isDir = entries[index].second;
-	std::string full = joinPath(pickerDir, name);
-
-	if (isDir)
-	{
-		pickerDir = full;
-		pickerOffset = 0;
-		return;
-	}
-
-	if (picker == PICK_MAPTEX)
-	{
-		applyMapTexture(full);
-		picker = PICK_NONE;
-		return;
-	}
-
-	if (picker == PICK_PROJECT)
-	{
-		openProject(full);
-		picker = PICK_NONE;
-		return;
-	}
-
-	if (picker == PICK_MAP)
-	{
-		if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".sd7") == 0 ||
-		                        name.compare(name.size() - 4, 4, ".sdz") == 0))
-		{
-			std::string found = extractArchive(full, "/tmp/springmapeditor-import");
-			if (!found.empty())
-				loadMap(found);
-		} else
-		{
-			loadMap(full);
-		}
-		picker = PICK_NONE;
-	} else
-	{
-		textureDir = pickerDir;
-		int loaded = browser.LoadDirectory(textureDir);
-		for (int i = 0; i < loaded; ++i)
-		{
-			if (browser.at(i).name == name)
-			{
-				browser.select(i);
-				break;
-			}
-		}
-		printf("Texture directory set to %s (%d textures)\n", textureDir.c_str(), loaded);
-		picker = PICK_NONE;
-	}
-}
-
-static void drawPicker()
-{
-	if (picker == PICK_NONE)
-		return;
-
-	std::vector<std::pair<std::string, bool>> entries = listDirectory(pickerDir);
-
-	float panelW = 340.0f;
-	float panelH = 356.0f;
-	float x0 = 10.0f;
-	float y1 = (float)Main->height - 10.0f;
-	float y0 = y1 - panelH;
-
-	ui.begin();
-	addPanel(x0, y0, x0 + panelW, y1);
-
-	const int rows = kPickerRows;
-	float rowHeight = 22.0f;
-	float top = y1 - 34.0f;
-
-	int shown = 0;
-	for (size_t i = (size_t)pickerOffset; i < entries.size() && shown < rows; ++i, ++shown)
-	{
-		float y = top - (float)(shown + 1) * rowHeight;
-		bool isDir = entries[i].second;
-
-		ui.quad(x0 + 6, y, x0 + panelW - 6, y + rowHeight - 2, isDir ? 0.20f : 0.16f,
-		        isDir ? 0.28f : 0.19f, isDir ? 0.40f : 0.25f, 1.0f);
-		ui.addHit(ACT_PICKER_BASE + (int)i, x0 + 6, y, x0 + panelW - 6, y + rowHeight - 2);
-	}
-
-	addButton(x0 + 6, y0 + 6, 30, 20, "<", false, ACT_PICKER_PREV);
-	addButton(x0 + 40, y0 + 6, 30, 20, ">", false, ACT_PICKER_NEXT);
-	addButton(x0 + 74, y0 + 6, 34, 20, "Up", false, ACT_PICKER_UP);
-	addButton(x0 + panelW - 40, y0 + 6, 34, 20, "Close", false, ACT_PICKER_CLOSE);
-
-	ui.flush(screenMatrix(), 0);
-
-	ui.begin();
-	char title[256];
-	snprintf(title, sizeof(title), "%s", picker == PICK_MAP ? "Open map" : "Open textures");
-	ui.text(fontLarge, title, x0 + 8, y1 - 16, 1.0f, 1.0f, 1.0f, 1.0f);
-	ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
-
-	ui.begin();
-	char path[256];
-	snprintf(path, sizeof(path), "%s", pickerDir.c_str());
-	ui.text(fontSmall, path, x0 + 8, y1 - 30, 0.7f, 0.78f, 0.85f, 1.0f);
-
-	for (size_t i = (size_t)pickerOffset;
-	     i < entries.size() && shown > 0 && (int)(i - (size_t)pickerOffset) < rows; ++i)
-	{
-		int row = (int)(i - (size_t)pickerOffset);
-		float y = top - (float)(row + 1) * rowHeight;
-		char label[256];
-		snprintf(label, sizeof(label), "%s%s", entries[i].first.c_str(),
-		         entries[i].second ? "/" : "");
-		ui.text(fontSmall, label, x0 + 12, y + 6, 0.95f, 0.95f, 0.95f, 1.0f);
-	}
-
-	char count[64];
-	snprintf(count, sizeof(count), "%d entries", (int)entries.size());
-	ui.text(fontSmall, count, x0 + 8, y0 + 34, 0.6f, 0.7f, 0.8f, 1.0f);
-
-	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
-}
-
 static void drawPalette()
 {
 	if (!paletteVisible)
@@ -1949,7 +1698,7 @@ static void drawPalette()
 	const float panelW = kPaletteCols * (swatch + gap) + 12.0f;
 	const float panelH = kPaletteRows * (swatch + gap) + 48.0f;
 	const float x0 = 10.0f;
-	const float y1 = (float)Main->height - 10.0f;
+	const float y1 = (float)Main->viewTop() - 10.0f;
 	const float y0 = y1 - panelH;
 
 	ui.begin();
@@ -1970,7 +1719,8 @@ static void drawPalette()
 		if (rgb[0] == fixedColour[0] && rgb[1] == fixedColour[1] && rgb[2] == fixedColour[2])
 			ui.outline(x - 1, y - 1, x + swatch + 1, y + swatch + 1, 2.0f, 1.0f, 1.0f, 1.0f, 1.0f);
 
-		ui.addHit(ACT_PALETTE_BASE + i, x, y, x + swatch, y + swatch);
+		HitRegion swatchArea(ACT_PALETTE_BASE + i, Rect(x, y, x + swatch, y + swatch));
+		swatchArea.registerHit(ui);
 	}
 
 	addButton(x0 + panelW - 46.0f, y0 + 6.0f, 40.0f, 20.0f, "Close", false, ACT_PALETTE_CLOSE);
@@ -2039,7 +1789,7 @@ static void drawMapSettings()
 	const float panelW = 400.0f;
 	const float panelH = 306.0f;
 	const float x0 = 10.0f;
-	const float y1 = (float)Main->height - 10.0f;
+	const float y1 = (float)Main->viewTop() - 10.0f;
 	const float y0 = y1 - panelH;
 	const float controlX = x0 + 128.0f;
 	const float sliderW = 170.0f;
@@ -2061,11 +1811,10 @@ static void drawMapSettings()
 		float t = (values[i] - lo[i]) / (hi[i] - lo[i]);
 		t = std::max(0.0f, std::min(1.0f, t));
 
-		ui.quad(controlX, yTop + 2, controlX + sliderW, yTop + 18, 0.18f, 0.20f, 0.24f, 1.0f);
-		ui.quad(controlX, yTop + 2, controlX + sliderW * t, yTop + 18, 0.35f, 0.55f, 0.75f, 1.0f);
-		ui.outline(controlX, yTop + 2, controlX + sliderW, yTop + 18, 1.0f, 0.4f, 0.45f, 0.5f,
-		           1.0f);
-		ui.addHit(ACT_SLIDER_BASE + i, controlX, yTop + 2, controlX + sliderW, yTop + 18);
+		Slider slider(ACT_SLIDER_BASE + i, Rect(controlX, yTop + 2, controlX + sliderW, yTop + 18));
+		slider.setFocused(focusedControl == ACT_SLIDER_BASE + i);
+		slider.draw(ui, t);
+		slider.registerHit(ui);
 
 		sliderRect[i][0] = controlX;
 		sliderRect[i][1] = yTop + 2;
@@ -2083,9 +1832,10 @@ static void drawMapSettings()
 	for (int i = 0; i < FIELD_COUNT; ++i)
 	{
 		float yTop = mapRowY(y1, 3 + i);
-		ui.quad(controlX, yTop + 2, controlX + 110, yTop + 18, 0.22f, 0.24f, 0.28f, 1.0f);
-		ui.outline(controlX, yTop + 2, controlX + 110, yTop + 18, 1.0f, 0.45f, 0.5f, 0.55f, 1.0f);
-		ui.addHit(ACT_FIELD_BASE + i, controlX, yTop + 2, controlX + 110, yTop + 18);
+		TextField field(ACT_FIELD_BASE + i, Rect(controlX, yTop + 2, controlX + 110, yTop + 18));
+		field.setFocused(activeField == i);
+		field.drawBackground(ui);
+		field.registerHit(ui);
 		(void)fieldNames;
 	}
 
@@ -2124,32 +1874,19 @@ static void drawMapSettings()
 	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 }
 
-// Draws every button registered this frame (the bar and the pickers), so the
-// buttons are always painted above the panels that own them.
-static void drawButtons()
+// Draws the buttons registered this frame, starting at first, so the bar and
+// panel buttons are painted above their panels and dialog buttons are painted
+// above the dialog without repainting everything else on top of it.
+static void drawButtons(size_t first = 0)
 {
 	ui.begin();
-	for (size_t i = 0; i < buttons.size(); ++i)
-	{
-		const Button &b = buttons[i];
-		float r = b.active ? 0.30f : 0.20f;
-		float g = b.active ? 0.48f : 0.24f;
-		float bl = b.active ? 0.62f : 0.28f;
-		ui.quad(b.x, b.y, b.x + b.w, b.y + b.h, r, g, bl, 1.0f);
-		ui.outline(b.x, b.y, b.x + b.w, b.y + b.h, 1.0f, 0.45f, 0.50f, 0.55f, 1.0f);
-	}
+	for (size_t i = first; i < buttons.size(); ++i)
+		buttons[i].drawBackground(ui);
 	ui.flush(screenMatrix(), 0);
 
 	ui.begin();
-	for (size_t i = 0; i < buttons.size(); ++i)
-	{
-		const Button &b = buttons[i];
-		if (b.label.empty())
-			continue;
-		float tw = fontSmall.textWidth(b.label.c_str());
-		ui.text(fontSmall, b.label.c_str(), b.x + (b.w - tw) * 0.5f,
-		        b.y + (b.h - fontSmall.ascent()) * 0.5f, 1.0f, 1.0f, 1.0f, 1.0f);
-	}
+	for (size_t i = first; i < buttons.size(); ++i)
+		buttons[i].drawLabel(ui, fontSmall);
 	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 }
 
@@ -2178,6 +1915,8 @@ static void drawMenuBar()
 	ui.begin();
 	ui.quad(0, (float)Main->viewTop(), W, (float)Main->height, 0.16f, 0.17f, 0.20f, 1.0f);
 	ui.outline(0, (float)Main->viewTop(), W, (float)Main->height, 1.0f, 0.3f, 0.33f, 0.38f, 1.0f);
+	HitRegion bar(kUiBlockId, Rect(0, (float)Main->viewTop(), W, (float)Main->height));
+	bar.registerHit(ui);
 	ui.flush(screenMatrix(), 0);
 
 	const float y = (float)Main->viewTop() + 2.0f;
@@ -2218,7 +1957,8 @@ static void drawMenuDropdown()
 	for (int i = 0; i < count; ++i)
 	{
 		float y = top - (float)(i + 1) * itemH;
-		ui.addHit(ACT_MENU_ITEM_BASE + i, x, y, x + w, y + itemH);
+		HitRegion item(ACT_MENU_ITEM_BASE + i, Rect(x, y, x + w, y + itemH));
+		item.registerHit(ui);
 	}
 	ui.flush(screenMatrix(), 0);
 
@@ -2244,8 +1984,12 @@ static void drawDialog()
 	const float y0 = y1 - h;
 
 	ui.begin();
-	// Dim the whole window behind the dialog.
+	// Dim the whole window behind the dialog. The full-window hit area makes the
+	// dialog modal: every click is consumed, including clicks on the dimmed area
+	// and on the dialog frame itself, and nothing reaches the UI below.
 	ui.quad(0, 0, (float)Main->width, (float)Main->height, 0.0f, 0.0f, 0.0f, 0.45f);
+	HitRegion modal(kUiBlockId, Rect(0, 0, (float)Main->width, (float)Main->height));
+	modal.registerHit(ui);
 	addPanel(x0, y0, x0 + w, y1);
 	ui.flush(screenMatrix(), 0);
 
@@ -2308,10 +2052,12 @@ static void drawDialog()
 	if (dialog == DLG_SAVE_AS || dialog == DLG_EXPORT || dialog == DLG_NEW)
 	{
 		float fx0 = x0 + 12, fx1 = x0 + w - 12, fy0 = y1 - 78, fy1 = y1 - 58;
+		const bool pathFocused = dialogTextActive && dialogField == 0;
 		ui.begin();
-		ui.quad(fx0, fy0, fx1, fy1, 0.22f, 0.24f, 0.28f, 1.0f);
-		ui.outline(fx0, fy0, fx1, fy1, 1.0f, 0.45f, 0.5f, 0.55f, 1.0f);
-		ui.addHit(ACT_DIALOG_BASE + 10, fx0, fy0, fx1, fy1);
+		TextField field(ACT_DIALOG_BASE + 10, Rect(fx0, fy0, fx1, fy1));
+		field.setFocused(pathFocused);
+		field.drawBackground(ui);
+		field.registerHit(ui);
 		if (dialog == DLG_NEW)
 		{
 			// Width and height, in units of 512 map squares.
@@ -2321,10 +2067,10 @@ static void drawDialog()
 				float sy = fy0 - 26.0f - (float)i * 44.0f;
 				float t = (float)(i == 0 ? newMapUnitsX : newMapUnitsY) / 40.0f;
 				t = std::max(0.0f, std::min(1.0f, t));
-				ui.quad(fx0, sy, fx0 + 260, sy + 16, 0.18f, 0.20f, 0.24f, 1.0f);
-				ui.quad(fx0, sy, fx0 + 260.0f * t, sy + 16, 0.35f, 0.55f, 0.75f, 1.0f);
-				ui.outline(fx0, sy, fx0 + 260, sy + 16, 1.0f, 0.4f, 0.45f, 0.5f, 1.0f);
-				ui.addHit(ACT_DIALOG_BASE + 20 + i, fx0, sy, fx0 + 260, sy + 16);
+				Slider slider(ACT_DIALOG_BASE + 20 + i, Rect(fx0, sy, fx0 + 260, sy + 16));
+				slider.setFocused(focusedControl == ACT_DIALOG_BASE + 20 + i);
+				slider.draw(ui, t);
+				slider.registerHit(ui);
 				sliderRect[i][0] = fx0;
 				sliderRect[i][1] = sy;
 				sliderRect[i][2] = fx0 + 260;
@@ -2335,6 +2081,8 @@ static void drawDialog()
 
 		ui.begin();
 		std::string shown = fieldText;
+		if (pathFocused)
+			shown += "|";
 		ui.text(fontSmall, fitText(shown, fx1 - fx0 - 8).c_str(), fx0 + 4, fy0 + 6, 1.0f, 1.0f,
 		        1.0f, 1.0f);
 		if (dialog == DLG_NEW)
@@ -2350,27 +2098,20 @@ static void drawDialog()
 		ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 	}
 
-	ui.begin();
+	ButtonStyle dialogButtonStyle;
+	dialogButtonStyle.r = 0.24f;
+	dialogButtonStyle.g = 0.30f;
+	dialogButtonStyle.b = 0.38f;
+	dialogButtonStyle.outlineR = 0.45f;
+	dialogButtonStyle.outlineG = 0.55f;
+	dialogButtonStyle.outlineB = 0.65f;
 	for (int i = 0; i < buttonCount; ++i)
 	{
 		float bw = 90.0f;
 		float bx = x0 + w - 12.0f - (float)(buttonCount - i) * (bw + 6.0f) + 6.0f;
-		ui.quad(bx, y0 + 10.0f, bx + bw, y0 + 34.0f, 0.24f, 0.30f, 0.38f, 1.0f);
-		ui.outline(bx, y0 + 10.0f, bx + bw, y0 + 34.0f, 1.0f, 0.45f, 0.55f, 0.65f, 1.0f);
-		ui.addHit(ACT_DIALOG_BASE + i, bx, y0 + 10.0f, bx + bw, y0 + 34.0f);
+		addButton(bx, y0 + 10.0f, bw, 24.0f, buttonLabels[i], false, ACT_DIALOG_BASE + i,
+		          dialogButtonStyle);
 	}
-	ui.flush(screenMatrix(), 0);
-
-	ui.begin();
-	for (int i = 0; i < buttonCount; ++i)
-	{
-		float bw = 90.0f;
-		float bx = x0 + w - 12.0f - (float)(buttonCount - i) * (bw + 6.0f) + 6.0f;
-		float tw = fontSmall.textWidth(buttonLabels[i]);
-		ui.text(fontSmall, buttonLabels[i], bx + (bw - tw) * 0.5f, y0 + 17.0f, 1.0f, 1.0f, 1.0f,
-		        1.0f);
-	}
-	ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 }
 
 static void drawProgressFrame()
@@ -3099,7 +2840,8 @@ static void drawTexturePanel()
 		ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 
 		ui.begin();
-		ui.addHit(ACT_TEXTURE_BASE + index, x0 + 4, y - 2, x0 + w - 4, y + 62);
+		HitRegion row(ACT_TEXTURE_BASE + index, Rect(x0 + 4, y - 2, x0 + w - 4, y + 62));
+		row.registerHit(ui);
 		ui.flush(screenMatrix(), 0);
 	}
 }
@@ -3113,17 +2855,17 @@ static void drawBottomBar()
 
 	ui.begin();
 	ui.quad(0, 0, W, barH, 0.12f, 0.14f, 0.17f, 1.0f);
+	HitRegion bar(kUiBlockId, Rect(0, 0, W, barH));
+	bar.registerHit(ui);
 
 	// The bar has two strips: the texture thumbnails along the bottom and the
 	// control panels above them, both stretched to the full window width.
 
-	const float panelsTop = barH - 4.0f;
-	const float panelsBottom = 4.0f;
-	const float panelH = std::max(40.0f, panelsTop - panelsBottom);
-	const float buttonH = std::max(20.0f, std::min(32.0f, panelH * 0.36f));
-	const float textBlock = 26.0f;
-	const float contentH = buttonH + textBlock;
-	const float contentBottom = panelsBottom + (panelH - contentH) * 0.5f;
+	const float panelsTop = barH - kBarMarginY;
+	const float panelsBottom = kBarMarginY;
+	const float buttonH = kBarButtonH;
+	const float textBlock = kBarTextBlock;
+	const float contentBottom = panelsBottom + kBarPaddingY;
 	const float buttonY = contentBottom + textBlock;
 	const float titleY = contentBottom + 14.0f;
 	const float infoY = contentBottom + 2.0f;
@@ -3215,7 +2957,8 @@ static void drawBottomBar()
 		ui.quad(sx, buttonY, sx + 18, buttonY + buttonH, 0.18f, 0.20f, 0.24f, 1.0f);
 		ui.quad(sx, buttonY, sx + 18, buttonY + buttonH * v, i == 0 ? 0.95f : 0.25f,
 		        i == 1 ? 0.95f : 0.25f, i == 2 ? 0.95f : 0.25f, 1.0f);
-		ui.addHit(ACT_COLOUR_BASE + i, sx, buttonY, sx + 18, buttonY + buttonH);
+		HitRegion channel(ACT_COLOUR_BASE + i, Rect(sx, buttonY, sx + 18, buttonY + buttonH));
+		channel.registerHit(ui);
 	}
 
 	addButton(px + 96.0f, buttonY, 40, buttonH, "Pal", paletteVisible, ACT_PALETTE_OPEN);
@@ -3412,7 +3155,9 @@ static void brushOutlinePoint(int shape, double cx, double cz, double r, double 
 
 static void drawBrushOutline()
 {
-	if (brushsize <= 0.0f)
+	// The outline samples the map heightmap, so there is nothing to draw until a
+	// map has been loaded.
+	if (!map || brushsize <= 0.0f)
 		return;
 
 	bool smooth = Main->getkey(SDL_SCANCODE_S);
@@ -3531,7 +3276,7 @@ int main(int argc, char **argv)
 	Main = new engine;
 	gs = new gst;
 
-	if (!Main->Init3d(1024, 768, 24, false))
+	if (!Main->Init3d(1280, 720, 24, false))
 	{
 		printf("Failed to initialize OpenGL, exiting\n");
 		delete Main;
@@ -3566,6 +3311,49 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Warning: no TrueType font found, on-screen text disabled. "
 		                "Set SPRINGMAPEDITOR_FONT to a .ttf file.\n");
 
+	picker.setSelectHandler([](FileDialog::Mode mode, const std::string &path) {
+		switch (mode)
+		{
+		case FileDialog::Mode::MapTexture:
+			applyMapTexture(path);
+			break;
+		case FileDialog::Mode::Project:
+			openProject(path);
+			break;
+		case FileDialog::Mode::Map: {
+			std::string name = fileName(path);
+			if (name.size() > 4 && (name.compare(name.size() - 4, 4, ".sd7") == 0 ||
+			                        name.compare(name.size() - 4, 4, ".sdz") == 0))
+			{
+				std::string found = extractArchive(path, "/tmp/springmapeditor-import");
+				if (!found.empty())
+					loadMap(found);
+			} else
+			{
+				loadMap(path);
+			}
+			break;
+		}
+		case FileDialog::Mode::Textures: {
+			textureDir = dirName(path);
+			std::string name = fileName(path);
+			int loaded = browser.LoadDirectory(textureDir);
+			for (int i = 0; i < loaded; ++i)
+			{
+				if (browser.at(i).name == name)
+				{
+					browser.select(i);
+					break;
+				}
+			}
+			printf("Texture directory set to %s (%d textures)\n", textureDir.c_str(), loaded);
+			break;
+		}
+		default:
+			break;
+		}
+	});
+
 	if (!requestedDir.empty())
 		mapDir = requestedDir;
 
@@ -3575,7 +3363,7 @@ int main(int argc, char **argv)
 	if (!textureDir.empty())
 		browser.LoadDirectory(textureDir);
 
-	Main->setBarHeight(Main->height / 5);
+	Main->setBarHeight(kBarHeight);
 	signal(SIGINT, handle_interrupt);
 
 	printf("Entering main loop\n");
@@ -3584,8 +3372,8 @@ int main(int argc, char **argv)
 	{
 		glViewport(0, 0, Main->width, Main->height);
 		Main->clearscreen(0.22f, 0.23f, 0.26f, 1.0f);
-		// The bar is a fixed height; only very small windows shrink it.
-		Main->setBarHeight(std::min(150, Main->height / 3));
+		// The bar is a fixed height sized to fit its controls exactly.
+		Main->setBarHeight(kBarHeight);
 		Main->setMenuHeight(kMenuHeight);
 		if (Main->closeRequested)
 		{
@@ -3593,15 +3381,19 @@ int main(int argc, char **argv)
 			requestQuit();
 		}
 
+		// While a dialog is open it owns the mouse: camera gestures and wheel
+		// input must not leak through the modal frame to the view or the panels.
+		const bool modal = dialog != DLG_NONE;
+
 		// --- camera ---
-		if (Main->mouseright && !orbiting)
+		if (!modal && Main->mouseright && !orbiting)
 		{
 			orbiting = true;
 			pivx = (float)mx;
 			pivy = (float)my;
 			pivz = (float)mz;
 		}
-		if (!Main->mouseright)
+		if (!Main->mouseright || modal)
 			orbiting = false;
 
 		if (orbiting)
@@ -3614,7 +3406,7 @@ int main(int argc, char **argv)
 		// cursor by moving the pivot by the same world space amount.
 		static bool panning = false;
 		static float grabbedX = 0.0f, grabbedZ = 0.0f;
-		if (Main->mousecenter)
+		if (!modal && Main->mousecenter)
 		{
 			float gx, gz;
 			if (Main->groundPoint(Main->mousex, Main->mousey, &gx, &gz))
@@ -3635,14 +3427,18 @@ int main(int argc, char **argv)
 			panning = false;
 		}
 
-		if (Main->getwup())
+		// Read (and consume) the wheel even while modal so a stale event does not
+		// fire once the dialog closes.
+		bool wheelUp = Main->getwup();
+		bool wheelDown = Main->getwdown();
+		if (!modal && wheelUp)
 		{
 			if (mouseOverTexturePanel())
 				texScroll = std::max(0, texScroll - 1);
 			else
 				camDist *= 0.85f;
 		}
-		if (Main->getwdown())
+		if (!modal && wheelDown)
 		{
 			if (mouseOverTexturePanel())
 				++texScroll;
@@ -3665,10 +3461,13 @@ int main(int argc, char **argv)
 		if (Main->right)
 			pivz -= pan;
 
-		// --- map settings sliders ---
-		if (activeSlider >= 0 && Main->mouseleft)
+		// --- sliders ---
+		// Map settings sliders are inert while a dialog is open; only the size
+		// sliders inside the new map dialog may be dragged.
+		const bool sliderAllowed = !modal || (dialog == DLG_NEW && sliderIsNewMap);
+		if (activeSlider >= 0 && Main->mouseleft && sliderAllowed)
 			updateSliderFromMouse(activeSlider);
-		if (!Main->mouseleft)
+		if (!Main->mouseleft || !sliderAllowed)
 			activeSlider = -1;
 
 		if (heightRangeDirty)
@@ -3686,18 +3485,31 @@ int main(int argc, char **argv)
 		}
 
 		// --- map info text fields ---
+		// The map info fields must not keep receiving keys while a dialog has the
+		// keyboard.
+		if (modal)
+			activeField = -1;
 		if (activeField >= 0 || dialogTextActive)
 		{
 			for (size_t i = 0; i < Main->textInput.size(); ++i)
 			{
 				char c = Main->textInput[i];
-				if (dialogTextActive && dialogField == 1)
+				if (dialogTextActive)
 				{
-					if ((c >= '0' && c <= '9') || c == 'x' || c == 'X')
-						dialogSizeText += c;
-				} else if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == '_' ||
-				           c == '/')
+					if (dialogField == 1)
+					{
+						if ((c >= '0' && c <= '9') || c == 'x' || c == 'X')
+							dialogSizeText += c;
+					} else if (c >= 32 && c <= 126)
+					{
+						// Path field: accept any printable character.
+						fieldText += c;
+					}
+				} else if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+')
+				{
+					// Numeric map info field.
 					fieldText += c;
+				}
 			}
 			if (Main->backspacePressed)
 			{
@@ -3731,6 +3543,11 @@ int main(int argc, char **argv)
 		Main->backspacePressed = false;
 		Main->enterPressed = false;
 		Main->escapePressed = false;
+
+		// Key presses typed into a field (or while a dialog is open) must not
+		// stay queued and fire as editor shortcuts once focus returns.
+		if (activeField >= 0 || dialogTextActive || dialog != DLG_NONE)
+			memset(Main->keyPressed, 0, sizeof(Main->keyPressed));
 
 		// The shortcuts are disabled while a map info field has the keyboard.
 		if (activeField < 0 && !dialogTextActive && dialog == DLG_NONE)
@@ -3824,13 +3641,37 @@ int main(int argc, char **argv)
 		int hit = ui.hit((float)Main->mousex, (float)(Main->height - Main->mousey));
 		bool mousePressed = Main->getmousedown();
 
-		// A dialog takes every click while it is open.
+		// Focus follows the clicked control. Dropping the keyboard focus of the
+		// previous text field is what makes a newly clicked field take over.
+		if (mousePressed)
+		{
+			focusedControl = (hit >= 0 && hit != kUiBlockId) ? hit : -1;
+			if (dialogTextActive && hit != ACT_DIALOG_BASE + 10)
+				dialogTextActive = false;
+			if (activeField >= 0 && hit != ACT_FIELD_BASE + activeField)
+				activeField = -1;
+		}
+
+		// A dialog is modal: only its own controls can act on a click. The
+		// full-window hit area added when the dialog is drawn consumes clicks on
+		// the dimmed background and on the frame itself, so nothing leaks through
+		// to the UI below. A dialog is only dismissed by one of its buttons.
 		if (dialog != DLG_NONE)
 		{
-			if (mousePressed && hit >= ACT_DIALOG_BASE)
+			if (mousePressed && hit >= ACT_DIALOG_BASE && hit < kUiBlockId)
 			{
 				int b = hit - ACT_DIALOG_BASE;
-				if (dialog == DLG_EXIT)
+				if ((dialog == DLG_SAVE_AS || dialog == DLG_EXPORT || dialog == DLG_NEW) && b == 10)
+				{
+					dialogTextActive = true;
+					dialogField = 0;
+					fieldText.clear();
+				} else if (dialog == DLG_NEW && (b == 20 || b == 21))
+				{
+					sliderIsNewMap = true;
+					activeSlider = b - 20;
+					updateSliderFromMouse(activeSlider);
+				} else if (dialog == DLG_EXIT)
 				{
 					if (b == 0)
 					{
@@ -3851,8 +3692,10 @@ int main(int argc, char **argv)
 					} else if (b == 1)
 					{
 						Main->quit = true;
-					} else
+					} else if (b == 2)
+					{
 						dialog = DLG_NONE;
+					}
 				} else if (dialog == DLG_SAVE_AS)
 				{
 					if (b == 0)
@@ -3863,8 +3706,10 @@ int main(int argc, char **argv)
 						if (quitAfterSave)
 							Main->quit = true;
 						quitAfterSave = false;
-					} else
+					} else if (b == 1)
+					{
 						dialog = DLG_NONE;
+					}
 				} else if (dialog == DLG_EXPORT)
 				{
 					if (b == 0)
@@ -3872,17 +3717,24 @@ int main(int argc, char **argv)
 						std::string target = fieldText;
 						dialog = DLG_NONE;
 						startExport(target);
-					} else
+					} else if (b == 1)
+					{
 						dialog = DLG_NONE;
+					}
 				} else if (dialog == DLG_CONFIRM)
 				{
-					dialog = DLG_NONE;
-					if (b == 0 && confirmAction == ACT_IMPORT_TEXTURE)
+					if (b == 0)
 					{
-						picker = PICK_MAPTEX;
-						pickerDir =
-						    textureDir.empty() ? (mapDir.empty() ? "." : mapDir) : textureDir;
-						pickerOffset = 0;
+						dialog = DLG_NONE;
+						if (confirmAction == ACT_IMPORT_TEXTURE)
+						{
+							picker.open(FileDialog::Mode::MapTexture,
+							            textureDir.empty() ? (mapDir.empty() ? "." : mapDir)
+							                               : textureDir);
+						}
+					} else if (b == 1)
+					{
+						dialog = DLG_NONE;
 					}
 				} else if (dialog == DLG_NEW)
 				{
@@ -3892,23 +3744,19 @@ int main(int argc, char **argv)
 						std::string size = dialogSizeText;
 						dialog = DLG_NONE;
 						createNewMap(target, size);
-					} else
+					} else if (b == 1)
+					{
 						dialog = DLG_NONE;
-				} else if (b == 10)
+					}
+				} else if (dialog == DLG_MESSAGE)
 				{
-					dialogTextActive = true;
-					dialogField = 0;
-					fieldText.clear();
-				} else if (b == 20 || b == 21)
-				{
-					sliderIsNewMap = true;
-					activeSlider = b - 20;
-					updateSliderFromMouse(activeSlider);
-				} else
-				{
-					dialog = DLG_NONE;
+					if (b == 0)
+						dialog = DLG_NONE;
 				}
 			}
+		} else if (mousePressed && hit == kUiBlockId)
+		{
+			// A panel background or another inert frame consumed the click.
 		} else if (mousePressed && hit >= ACT_MENU_ITEM_BASE)
 		{
 			int item = hit - ACT_MENU_ITEM_BASE;
@@ -3918,6 +3766,9 @@ int main(int argc, char **argv)
 				openMenu = -1;
 				handleAction(action);
 			}
+		} else if (mousePressed && picker.handleClick(hit))
+		{
+			// The file dialog handled this action.
 		} else if (mousePressed && hit >= 0)
 		{
 			if (hit >= ACT_FIELD_BASE)
@@ -3941,9 +3792,6 @@ int main(int argc, char **argv)
 				int index = hit - ACT_PALETTE_BASE;
 				if (index >= 0 && index < kPaletteCols * kPaletteRows)
 					paletteColour(index, fixedColour);
-			} else if (hit >= ACT_PICKER_BASE)
-			{
-				handlePickerClick(hit - ACT_PICKER_BASE);
 			} else if (hit >= ACT_COLOUR_BASE)
 			{
 				int channel = hit - ACT_COLOUR_BASE;
@@ -4106,18 +3954,9 @@ int main(int argc, char **argv)
 		glViewport(0, 0, Main->width, Main->height);
 		buttons.clear();
 		ui.clearHits();
-		drawTexturePanel();
-		drawMenuBar();
-		drawBottomBar();
-		drawHelpPanel();
-		drawPicker();
-		drawPalette();
-		drawMapSettings();
-		drawButtons();
-		drawMenuDropdown();
-		drawDialog();
-		drawButtons();
 
+		// The empty-project message sits on the view, below every panel and
+		// dialog, so opening a dialog does not get covered by it.
 		if (!map)
 		{
 			ui.begin();
@@ -4136,6 +3975,19 @@ int main(int argc, char **argv)
 			}
 			ui.flush(screenMatrix(), fontLarge.ok() ? fontLarge.atlasTexture() : 0);
 		}
+
+		drawTexturePanel();
+		drawMenuBar();
+		drawBottomBar();
+		drawHelpPanel();
+		picker.draw(ui, screenMatrix(), fontSmall, fontLarge, Main->viewTop(), focusedControl);
+		drawPalette();
+		drawMapSettings();
+		drawButtons();
+		const size_t panelButtonCount = buttons.size();
+		drawMenuDropdown();
+		drawDialog();
+		drawButtons(panelButtonCount);
 		glEnable(GL_DEPTH_TEST);
 
 		if (haveMap)

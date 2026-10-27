@@ -29,8 +29,11 @@ endif()
 
 add_executable(editor
 
+    controls.cxx
     dxt1.cxx
     engine.cxx
+    filedialog.cxx
+    fileutils.cxx
     float3.cpp
     font.cxx
     main.cc
