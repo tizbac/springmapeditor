@@ -359,17 +359,18 @@ bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees,
 				if (want > kMaxLod)
 					want = kMaxLod;
 
-				// Do not tessellate finer than the heights can use: while the
-				// relief of the square is smaller than the world size of one of
-				// its quads, the extra vertices only repeat the same height, so
-				// the square is coarsened (a perfectly flat square ends up as a
-				// single quad, like the engine's flat patches).
+				// Coarsen while the height change from one quad to the next is
+				// below what a pixel can show: flat ground then collapses to a
+				// single quad, the way the engine leaves flat patches alone.
 				float relief = sq.cy1 - sq.cy0;
+				float pxPerUnit = size * 0.5f;
 				while (want < kMaxLod)
 				{
 					int quads = 1024 >> want;
-					float quadWorld = 2.0f / (float)(quads > 0 ? quads : 1);
-					if (relief >= quadWorld * 0.5f)
+					if (quads < 1)
+						quads = 1;
+					float perQuad = relief / (float)quads;
+					if (perQuad * pxPerUnit >= 1.5f)
 						break;
 					++want;
 				}
