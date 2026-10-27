@@ -204,6 +204,143 @@ CBFGroundTextures::PaintLayer *CBFGroundTextures::existingPaintLayer(int bx, int
 	return layer.data.empty() ? NULL : &layer;
 }
 
+bool CBFGroundTextures::setColormap(const unsigned char *rgb, int width, int height)
+{
+	const int targetW = numBigTexX * 1024;
+	const int targetH = numBigTexY * 1024;
+	if (!rgb || width <= 0 || height <= 0 || targetW <= 0 || targetH <= 0)
+		return false;
+
+	importedColormap.assign((size_t)targetW * targetH * 3, 0);
+
+	// Nearest neighbour is fine here: the image is normally larger than the tile
+	// grid and the point is to replace the ground, not to filter it.
+	for (int y = 0; y < targetH; ++y)
+	{
+		int sy = (int)((long long)y * height / targetH);
+		for (int x = 0; x < targetW; ++x)
+		{
+			int sx = (int)((long long)x * width / targetW);
+			const unsigned char *src = &rgb[((size_t)sy * width + sx) * 3];
+			unsigned char *dst = &importedColormap[((size_t)y * targetW + x) * 3];
+			dst[0] = src[0];
+			dst[1] = src[1];
+			dst[2] = src[2];
+		}
+	}
+
+	// Rebuild the per square textures from the image.
+	std::vector<unsigned char> rgba((size_t)1024 * 1024 * 4);
+	for (int by = 0; by < numBigTexY; ++by)
+	{
+		for (int bx = 0; bx < numBigTexX; ++bx)
+		{
+			for (int y = 0; y < 1024; ++y)
+			{
+				size_t row = (size_t)(by * 1024 + y) * targetW + (size_t)bx * 1024;
+				for (int x = 0; x < 1024; ++x)
+				{
+					const unsigned char *src = &importedColormap[(row + x) * 3];
+					unsigned char *dst = &rgba[((size_t)y * 1024 + x) * 4];
+					dst[0] = src[0];
+					dst[1] = src[1];
+					dst[2] = src[2];
+					dst[3] = 255;
+				}
+			}
+
+			GroundSquare *square = &squares[by * numBigTexX + bx];
+			glBindTexture(GL_TEXTURE_2D, square->texture);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1024, 1024, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+			             rgba.data());
+			glGenerateMipmap(GL_TEXTURE_2D);
+		}
+	}
+
+	return true;
+}
+
+bool CBFGroundTextures::buildColormap(std::vector<unsigned char> &rgb)
+{
+	const int texelsPerSquare = 8;
+	const int tilesPerSquare = 4; // a 32 texel tile covers four map squares
+	const int width = numBigTexX * 1024;
+	const int height = numBigTexY * 1024;
+	if (width <= 0 || height <= 0)
+		return false;
+
+	rgb.assign((size_t)width * height * 3, 0);
+
+	if (!importedColormap.empty())
+	{
+		rgb = importedColormap;
+	} else
+	{
+	std::vector<unsigned char> texel(32 * 32 * 4);
+	for (int ty = 0; ty < tileMapYSize; ++ty)
+	{
+		for (int tx = 0; tx < tileMapXSize; ++tx)
+		{
+			int index = tileMap[(size_t)ty * tileMapXSize + tx];
+			const unsigned char *tile = &tiles[(size_t)index * SMALL_TILE_SIZE];
+			dxt1_decode(tile, 32, 32, texel.data());
+
+			for (int y = 0; y < 32; ++y)
+			{
+				size_t row = (size_t)(ty * 32 + y) * width + (size_t)tx * 32;
+				for (int x = 0; x < 32; ++x)
+				{
+					const unsigned char *src = &texel[((size_t)y * 32 + x) * 4];
+					unsigned char *dst = &rgb[(row + x) * 3];
+					dst[0] = src[0];
+					dst[1] = src[1];
+					dst[2] = src[2];
+				}
+			}
+		}
+	}
+	}
+
+	// Blend the painted colours over the tiles, the same way the shader does.
+	for (int by = 0; by < numBigTexY; ++by)
+	{
+		for (int bx = 0; bx < numBigTexX; ++bx)
+		{
+			const PaintLayer &layer = paint[by * numBigTexX + bx];
+			if (layer.data.empty())
+				continue;
+
+			for (int py = 0; py < bigSquareSize; ++py)
+			{
+				for (int px = 0; px < bigSquareSize; ++px)
+				{
+					const unsigned char *src = &layer.data[((size_t)py * bigSquareSize + px) * 4];
+					if (src[3] == 0)
+						continue;
+					float a = src[3] / 255.0f;
+					for (int y = 0; y < texelsPerSquare; ++y)
+					{
+						size_t row = (size_t)(by * 1024 + py * texelsPerSquare + y) * width;
+						for (int x = 0; x < texelsPerSquare; ++x)
+						{
+							unsigned char *dst =
+							    &rgb[(row + bx * 1024 + px * texelsPerSquare + x) * 3];
+							dst[0] = (unsigned char)(dst[0] + (src[0] - dst[0]) * a);
+							dst[1] = (unsigned char)(dst[1] + (src[1] - dst[1]) * a);
+							dst[2] = (unsigned char)(dst[2] + (src[2] - dst[2]) * a);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	(void)tilesPerSquare;
+	return true;
+}
+
 GLuint CBFGroundTextures::paintTexture(int bx, int by)
 {
 	PaintLayer *layer = existingPaintLayer(bx, by);

@@ -39,6 +39,7 @@
 #include "Map/SMF/mapfile.h"
 #include "engine.h"
 #include "font.h"
+#include "mapwriter.h"
 #include "mat4.h"
 #include "terrain.h"
 #include "texturebrowser.h"
@@ -50,7 +51,7 @@
 
 enum BrushShape { BRUSH_CIRCLE = 0, BRUSH_SQUARE = 1, BRUSH_TRIANGLE = 2 };
 enum PaintMode { MODE_HEIGHT = 0, MODE_METAL = 1, MODE_PAINT = 2, MODE_COLOUR = 3 };
-enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2, PICK_PROJECT = 3 };
+enum Picker { PICK_NONE = 0, PICK_MAP = 1, PICK_TEXTURES = 2, PICK_PROJECT = 3, PICK_MAPTEX = 4 };
 
 enum Action {
 	ACT_NONE = 0,
@@ -91,6 +92,7 @@ enum Action {
 	ACT_SAVE_PROJECT_AS,
 	ACT_IMPORT_MAP,
 	ACT_EXPORT_MAP,
+	ACT_IMPORT_TEXTURE,
 	ACT_EDIT_UNDO,
 	ACT_EDIT_REDO,
 	ACT_MAP_SETTINGS,
@@ -108,7 +110,6 @@ enum Action {
 };
 
 // Dialog kinds.
-enum Dialog { DLG_NONE = 0, DLG_EXIT, DLG_SAVE_AS, DLG_EXPORT, DLG_MESSAGE, DLG_PROGRESS };
 
 // Menu items, per menu.
 struct MenuItem {
@@ -116,10 +117,15 @@ struct MenuItem {
 	int action;
 };
 static const MenuItem fileMenu[] = {
-    {"New project", ACT_NEW_PROJECT},         {"Open project...", ACT_OPEN_PROJECT},
-    {"Save project", ACT_SAVE_PROJECT},       {"Save project as...", ACT_SAVE_PROJECT_AS},
-    {"Import map...", ACT_IMPORT_MAP},        {"Export map...", ACT_EXPORT_MAP},
-    {"Texture folder...", ACT_OPEN_TEXTURES}, {"Quit", ACT_QUIT},
+    {"New project", ACT_NEW_PROJECT},
+    {"Open project...", ACT_OPEN_PROJECT},
+    {"Save project", ACT_SAVE_PROJECT},
+    {"Save project as...", ACT_SAVE_PROJECT_AS},
+    {"Import map...", ACT_IMPORT_MAP},
+    {"Import map texture...", ACT_IMPORT_TEXTURE},
+    {"Export map...", ACT_EXPORT_MAP},
+    {"Texture folder...", ACT_OPEN_TEXTURES},
+    {"Quit", ACT_QUIT},
 };
 static const MenuItem editMenu[] = {
     {"Undo", ACT_EDIT_UNDO},
@@ -131,7 +137,7 @@ static const MenuItem viewMenu[] = {
     {"Metal / height overlay", ACT_DEBUG},
 };
 static const MenuItem *menus[3] = {fileMenu, editMenu, viewMenu};
-static const int menuCounts[3] = {8, 3, 3};
+static const int menuCounts[3] = {9, 3, 3};
 static int openMenu = -1;
 static int dialog = DLG_NONE;
 static std::string dialogPath;
@@ -143,6 +149,9 @@ static float progressValue = 0.0f;
 static std::string progressText;
 static bool quitAfterSave = false;
 static bool dialogTextActive = false;
+static int dialogField = 0; // 0 = the path field, 1 = the size field
+static int confirmAction = 0;
+static std::string dialogSizeText = "1024x1024";
 static const int kMenuHeight = 24;
 
 static const char *modeNames[] = {"height", "metal", "texture", "colour"};
@@ -288,6 +297,7 @@ static void paletteColour(int index, unsigned char out[3])
 static void requestQuit();
 static void saveProject(const std::string &dir);
 static void openProject(const std::string &dir);
+static void createNewMap(const std::string &path, const std::string &sizeText);
 static std::string extractArchive(const std::string &archivePath, const std::string &dir);
 
 static int picker = PICK_NONE;
@@ -1511,9 +1521,13 @@ static void handleAction(int action)
 		openMenu = (openMenu == action - ACT_MENU_FILE) ? -1 : action - ACT_MENU_FILE;
 		break;
 	case ACT_NEW_PROJECT:
-		dialog = DLG_MESSAGE;
-		dialogTitle = "New project";
-		dialogMessage = "Open a map first; new maps are built from a template for now.";
+		dialog = DLG_NEW;
+		dialogTitle = "New map";
+		dialogMessage = "Path for the new .smf and its size in map squares";
+		fieldText = mapDir.empty() ? "newmap.smf" : joinPath(mapDir, "newmap.smf");
+		dialogSizeText = "1024x1024";
+		dialogField = 0;
+		dialogTextActive = true;
 		break;
 	case ACT_OPEN_PROJECT:
 		picker = PICK_PROJECT;
@@ -1541,6 +1555,12 @@ static void handleAction(int action)
 		                ? (mapPath.empty() ? "project" : pathWithoutExtension(mapPath) + ".proj")
 		                : projectDir;
 		dialogTextActive = true;
+		break;
+	case ACT_IMPORT_TEXTURE:
+		confirmAction = ACT_IMPORT_TEXTURE;
+		dialog = DLG_CONFIRM;
+		dialogTitle = "Import map texture";
+		dialogMessage = "This replaces all the ground textures. Continue?";
 		break;
 	case ACT_IMPORT_MAP:
 		picker = PICK_MAP;
@@ -1575,6 +1595,35 @@ static void handleAction(int action)
 	}
 }
 
+static void applyMapTexture(const std::string &path)
+{
+	if (!tex)
+		return;
+
+	std::vector<unsigned char> rgb;
+	int w = 0, h = 0;
+	if (!loadImageRgb(path, rgb, w, h) || w <= 0 || h <= 0)
+	{
+		dialog = DLG_MESSAGE;
+		dialogTitle = "Import map texture";
+		dialogMessage = "Could not read " + fileName(path);
+		return;
+	}
+
+	if (!tex->setColormap(rgb.data(), w, h))
+	{
+		dialog = DLG_MESSAGE;
+		dialogTitle = "Import map texture";
+		dialogMessage = "Could not apply the texture";
+		return;
+	}
+
+	dirty = true;
+	dialog = DLG_MESSAGE;
+	dialogTitle = "Import map texture";
+	dialogMessage = "Ground texture replaced with " + fileName(path);
+}
+
 static void handlePickerClick(int index)
 {
 	std::vector<std::pair<std::string, bool>> entries = listDirectory(pickerDir);
@@ -1589,6 +1638,13 @@ static void handlePickerClick(int index)
 	{
 		pickerDir = full;
 		pickerOffset = 0;
+		return;
+	}
+
+	if (picker == PICK_MAPTEX)
+	{
+		applyMapTexture(full);
+		picker = PICK_NONE;
 		return;
 	}
 
@@ -2022,6 +2078,11 @@ static void drawDialog()
 	int buttonCount = 0;
 	switch (dialog)
 	{
+	case DLG_CONFIRM:
+		buttonLabels[0] = "Continue";
+		buttonLabels[1] = "Cancel";
+		buttonCount = 2;
+		break;
 	case DLG_EXIT:
 		buttonLabels[0] = "Save";
 		buttonLabels[1] = "Discard";
@@ -2030,7 +2091,8 @@ static void drawDialog()
 		break;
 	case DLG_SAVE_AS:
 	case DLG_EXPORT:
-		buttonLabels[0] = dialog == DLG_EXPORT ? "Export" : "Save";
+	case DLG_NEW:
+		buttonLabels[0] = dialog == DLG_EXPORT ? "Export" : (dialog == DLG_NEW ? "Create" : "Save");
 		buttonLabels[1] = "Cancel";
 		buttonCount = 2;
 		break;
@@ -2040,20 +2102,32 @@ static void drawDialog()
 		break;
 	}
 
-	// Path field for the dialogs that ask for one.
-	if (dialog == DLG_SAVE_AS || dialog == DLG_EXPORT)
+	// Path (and size) fields for the dialogs that ask for them.
+	if (dialog == DLG_SAVE_AS || dialog == DLG_EXPORT || dialog == DLG_NEW)
 	{
 		float fx0 = x0 + 12, fx1 = x0 + w - 12, fy0 = y1 - 78, fy1 = y1 - 58;
 		ui.begin();
 		ui.quad(fx0, fy0, fx1, fy1, 0.22f, 0.24f, 0.28f, 1.0f);
 		ui.outline(fx0, fy0, fx1, fy1, 1.0f, 0.45f, 0.5f, 0.55f, 1.0f);
 		ui.addHit(ACT_DIALOG_BASE + 10, fx0, fy0, fx1, fy1);
+		if (dialog == DLG_NEW)
+		{
+			ui.quad(fx0, fy0 - 26, fx0 + 200, fy0 - 8, 0.22f, 0.24f, 0.28f, 1.0f);
+			ui.outline(fx0, fy0 - 26, fx0 + 200, fy0 - 8, 1.0f, 0.45f, 0.5f, 0.55f, 1.0f);
+			ui.addHit(ACT_DIALOG_BASE + 11, fx0, fy0 - 26, fx0 + 200, fy0 - 8);
+		}
 		ui.flush(screenMatrix(), 0);
 
 		ui.begin();
 		std::string shown = fieldText;
 		ui.text(fontSmall, fitText(shown, fx1 - fx0 - 8).c_str(), fx0 + 4, fy0 + 6, 1.0f, 1.0f,
 		        1.0f, 1.0f);
+		if (dialog == DLG_NEW)
+		{
+			ui.text(fontSmall, "size", fx0 + 206, fy0 + 6, 0.8f, 0.85f, 0.9f, 1.0f);
+			ui.text(fontSmall, fitText(dialogSizeText, 190).c_str(), x0 + 12, fy0 - 21, 1.0f, 1.0f,
+			        1.0f, 1.0f);
+		}
 		ui.flush(screenMatrix(), fontSmall.ok() ? fontSmall.atlasTexture() : 0);
 	}
 
@@ -2107,26 +2181,127 @@ static std::string smdPathFor(const std::string &smfPath)
 	return pathWithoutExtension(smfPath) + ".smd";
 }
 
+static void createNewMap(const std::string &path, const std::string &sizeText)
+{
+	int width = 1024, height = 1024;
+	int w = 0, h = 0;
+	if (sscanf(sizeText.c_str(), "%d%*[xX]%d", &w, &h) >= 1 && w > 0)
+	{
+		width = w;
+		height = h > 0 ? h : w;
+	}
+	width = std::max(128, std::min(8192, (width / 128) * 128));
+	height = std::max(128, std::min(8192, (height / 128) * 128));
+
+	dialog = DLG_PROGRESS;
+	progressValue = 0.2f;
+	progressText = "Creating map";
+	drawProgressFrame();
+
+	std::vector<unsigned short> heights((size_t)(width + 1) * (height + 1), 45875); // ~0.7
+	std::vector<unsigned char> metal((size_t)(width / 2) * (height / 2), 0);
+	std::vector<unsigned char> types((size_t)(width / 2) * (height / 2), 0);
+
+	MapWriteOptions options;
+	options.writeMinimap = true;
+
+	bool ok = writeMapFiles(path, width, height, heights, metal, types,
+	                        std::vector<unsigned char>(), -20.0f, 20.0f, options);
+
+	if (ok)
+	{
+		std::string smd = pathWithoutExtension(path) + ".smd";
+		FILE *f = fopen(smd.c_str(), "w");
+		if (f)
+		{
+			fprintf(f,
+			        "[MAP]\n{\n\tDescription=%s;\n\tTidalStrength=0;\n\tMaxMetal=0.02;\n"
+			        "\tGravity=130;\n\tExtractorRadius=500;\n\tMapHardness=100;\n}\n"
+			        "[ATMOSPHERE]\n{\n\tMinWind=5;\n\tMaxWind=25;\n}\n",
+			        fileStem(path).c_str());
+			fclose(f);
+		}
+		loadMap(path);
+		dirty = false;
+		dialog = DLG_MESSAGE;
+		dialogTitle = "New map";
+		dialogMessage = "Created " + path;
+	} else
+	{
+		dialog = DLG_MESSAGE;
+		dialogTitle = "New map";
+		dialogMessage = "Could not write " + path;
+	}
+}
+
 static void startExport(const std::string &path)
 {
+	if (!map || !tex)
+		return;
+
 	dialog = DLG_PROGRESS;
 	progressValue = 0.02f;
 	progressText = "Preparing";
 	drawProgressFrame();
 
-	saveMap(exportProgress);
-
-	if (path.size() > 4 && (path.compare(path.size() - 4, 4, ".sd7") == 0 ||
-	                        path.compare(path.size() - 4, 4, ".sdz") == 0))
+	const int width = gs->mapx + 1;
+	const int height = gs->mapy + 1;
+	std::vector<unsigned short> heights((size_t)width * height);
+	for (int i = 0; i < width * height; ++i)
 	{
-		progressValue = 0.95f;
+		float v = std::max(0.0f, std::min(1.0f, map->heightmap[i]));
+		heights[(size_t)i] = (unsigned short)(v * 65535.0f);
+	}
+
+	std::vector<unsigned char> metal((size_t)metalWidth * metalHeight);
+	memcpy(metal.data(), metalmap, metal.size());
+
+	std::vector<unsigned char> types((size_t)(gs->mapx / 2) * (gs->mapy / 2), 0);
+
+	progressValue = 0.08f;
+	progressText = "Reading ground texture";
+	drawProgressFrame();
+
+	std::vector<unsigned char> colormap;
+	tex->buildColormap(colormap);
+
+	MapWriteOptions options;
+	options.writeMinimap = true;
+
+	const std::string target = path;
+	progressText = "Compressing tiles";
+
+	bool ok = writeMapFiles(target, gs->mapx, gs->mapy, heights, metal, types, colormap, mapMinZ,
+	                        mapMaxZ, options, [](int done, int total) {
+		                        progressValue =
+		                            0.10f + 0.85f * (total > 0 ? (float)done / (float)total : 0.0f);
+		                        drawProgressFrame();
+	                        });
+
+	if (ok && target.size() > 4 &&
+	    (target.compare(target.size() - 4, 4, ".sd7") == 0 ||
+	     target.compare(target.size() - 4, 4, ".sdz") == 0))
+	{
+		progressValue = 0.97f;
 		progressText = "Packing archive";
 		drawProgressFrame();
+
+		std::string base = pathWithoutExtension(target);
+		std::string tempSmf = base + ".smf";
+		std::string tempSmt = base + ".smt";
+		std::string tempSmd = base + ".smd";
+		std::string archive = target;
+
+		std::string packed = "/tmp/springmapeditor-export.sd7";
 		std::vector<std::string> files;
-		files.push_back(mapPath);
-		files.push_back(smtPathFor(mapPath));
-		files.push_back(smdPathFor(mapPath));
-		writeArchive(path, files);
+		files.push_back(tempSmf);
+		files.push_back(tempSmt);
+		files.push_back(tempSmd);
+		writeArchive(packed, files);
+		rename(packed.c_str(), archive.c_str());
+		remove(tempSmf.c_str());
+		remove(tempSmt.c_str());
+		remove(tempSmd.c_str());
 	}
 
 	progressValue = 1.0f;
@@ -2135,7 +2310,7 @@ static void startExport(const std::string &path)
 
 	dialog = DLG_MESSAGE;
 	dialogTitle = "Export";
-	dialogMessage = "Exported " + path;
+	dialogMessage = ok ? ("Exported " + target) : ("Could not write " + target);
 }
 
 // ---------------------------------------------------------------- files
@@ -2318,6 +2493,41 @@ static bool loadPng32(const std::string &path, int w, int h, unsigned char *rgba
 	FreeImage_Unload(rgb);
 	return true;
 }
+// Loads any image FreeImage understands as top-down RGB.
+static bool loadImageRgb(const std::string &path, std::vector<unsigned char> &rgb, int &outW,
+                         int &outH)
+{
+	FIBITMAP *bmp = FreeImage_Load(FIF_UNKNOWN, path.c_str(), 0);
+	if (!bmp)
+		return false;
+	FIBITMAP *rgbBmp = FreeImage_ConvertTo24Bits(bmp);
+	FreeImage_Unload(bmp);
+	if (!rgbBmp)
+		return false;
+
+	const int w = (int)FreeImage_GetWidth(rgbBmp);
+	const int h = (int)FreeImage_GetHeight(rgbBmp);
+	const int pitch = (int)FreeImage_GetPitch(rgbBmp);
+	const BYTE *bits = FreeImage_GetBits(rgbBmp);
+
+	rgb.assign((size_t)w * h * 3, 0);
+	for (int y = 0; y < h; ++y)
+	{
+		const BYTE *src = bits + (size_t)y * pitch;
+		unsigned char *dst = &rgb[(size_t)(h - 1 - y) * w * 3];
+		for (int x = 0; x < w; ++x)
+		{
+			dst[x * 3 + 0] = src[x * 3 + 2];
+			dst[x * 3 + 1] = src[x * 3 + 1];
+			dst[x * 3 + 2] = src[x * 3 + 0];
+		}
+	}
+	FreeImage_Unload(rgbBmp);
+	outW = w;
+	outH = h;
+	return true;
+}
+
 #else
 static bool savePng16(const std::string &, int, int, const unsigned short *)
 {
@@ -3269,11 +3479,23 @@ int main(int argc, char **argv)
 			for (size_t i = 0; i < Main->textInput.size(); ++i)
 			{
 				char c = Main->textInput[i];
-				if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+')
+				if (dialogTextActive && dialogField == 1)
+				{
+					if ((c >= '0' && c <= '9') || c == 'x' || c == 'X')
+						dialogSizeText += c;
+				} else if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == '_' ||
+				           c == '/')
 					fieldText += c;
 			}
-			if (Main->backspacePressed && !fieldText.empty())
-				fieldText.pop_back();
+			if (Main->backspacePressed)
+			{
+				if (dialogTextActive && dialogField == 1)
+				{
+					if (!dialogSizeText.empty())
+						dialogSizeText.pop_back();
+				} else if (!fieldText.empty())
+					fieldText.pop_back();
+			}
 			if (Main->enterPressed)
 			{
 				if (!fieldText.empty())
@@ -3440,10 +3662,36 @@ int main(int argc, char **argv)
 						startExport(target);
 					} else
 						dialog = DLG_NONE;
+				} else if (dialog == DLG_CONFIRM)
+				{
+					dialog = DLG_NONE;
+					if (b == 0 && confirmAction == ACT_IMPORT_TEXTURE)
+					{
+						picker = PICK_MAPTEX;
+						pickerDir =
+						    textureDir.empty() ? (mapDir.empty() ? "." : mapDir) : textureDir;
+						pickerOffset = 0;
+					}
+				} else if (dialog == DLG_NEW)
+				{
+					if (b == 0)
+					{
+						std::string target = fieldText;
+						std::string size = dialogSizeText;
+						dialog = DLG_NONE;
+						createNewMap(target, size);
+					} else
+						dialog = DLG_NONE;
 				} else if (b == 10)
 				{
 					dialogTextActive = true;
+					dialogField = 0;
 					fieldText.clear();
+				} else if (b == 11)
+				{
+					dialogTextActive = true;
+					dialogField = 1;
+					dialogSizeText.clear();
 				} else
 				{
 					dialog = DLG_NONE;

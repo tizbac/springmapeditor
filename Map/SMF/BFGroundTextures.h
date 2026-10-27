@@ -63,6 +63,15 @@ class CBFGroundTextures {
 	PaintLayer *paintLayer(int bx, int by);
 	PaintLayer *existingPaintLayer(int bx, int by);
 	GLuint paintTexture(int bx, int by);
+
+	// Decodes the whole ground texture to RGB (mapx*8 by mapy*8 texels) with the
+	// paint layers blended in. Used when the map is exported.
+	bool buildColormap(std::vector<unsigned char> &rgb);
+
+	// Replaces every ground texture with the given RGB image (any size, it is
+	// rescaled to mapx*8 by mapy*8). Export and the colormap use it instead of
+	// the tiles from the .smt.
+	bool setColormap(const unsigned char *rgb, int width, int height);
 	void uploadPaintLayers();
 
 	int paintTexelIndex(int bx, int by, int px, int py) const
@@ -106,6 +115,7 @@ class CBFGroundTextures {
 
 	std::vector<PaintLayer> paint; // numBigTexX * numBigTexY, empty until painted
 	std::vector<unsigned char> paintDirty;
+	std::vector<unsigned char> importedColormap; // RGB, empty until a texture is imported
 
 	struct TileFile {
 		std::string path;
