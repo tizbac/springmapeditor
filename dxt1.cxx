@@ -9,11 +9,11 @@ namespace {
 inline void unpack565(unsigned short c, int &r, int &g, int &b)
 {
 	r = (c >> 11) & 0x1f;
-	g = (c >> 5) & 0x1f;
+	g = (c >> 5) & 0x3f; // green has six bits in RGB565
 	b = c & 0x1f;
-	// Expand five bits to eight.
+	// Expand to eight bits.
 	r = (r << 3) | (r >> 2);
-	g = (g << 3) | (g >> 2);
+	g = (g << 2) | (g >> 4);
 	b = (b << 3) | (b >> 2);
 }
 
@@ -22,7 +22,8 @@ inline unsigned short pack565(int r, int g, int b)
 	r = std::max(0, std::min(255, r));
 	g = std::max(0, std::min(255, g));
 	b = std::max(0, std::min(255, b));
-	return (unsigned short)(((r >> 3) << 11) | ((g >> 3) << 5) | (b >> 3));
+	// Standard RGB565: five bits of red, six of green, five of blue.
+	return (unsigned short)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
 }
 
 // Colour table of a DXT1 block: the four candidate colours of a block.
@@ -200,6 +201,39 @@ void dxt1_encode(const unsigned char *rgba, int w, int h, unsigned char *out)
 	{
 		for (int bx = 0; bx < w / 4; ++bx)
 		{
+			unsigned char *blockOut = out + ((size_t)by * (w / 4) + bx) * 8;
+
+			// A block of one colour (very common in flat and minimap areas) is
+			// a solid block: both endpoints equal, all indices 0. This skips the
+			// PCA search, which makes encoding solid maps near instant.
+			{
+				const unsigned char *p0 = rgba + ((size_t)(by * 4) * w + bx * 4) * 4;
+				bool uniform = true;
+				for (int j = 0; j < 4 && uniform; ++j)
+				{
+					for (int i = 0; i < 4; ++i)
+					{
+						const unsigned char *p =
+						    rgba + ((size_t)(by * 4 + j) * w + (bx * 4 + i)) * 4;
+						if (p[0] != p0[0] || p[1] != p0[1] || p[2] != p0[2])
+						{
+							uniform = false;
+							break;
+						}
+					}
+				}
+				if (uniform)
+				{
+					unsigned short c = pack565(p0[0], p0[1], p0[2]);
+					blockOut[0] = (unsigned char)(c & 0xff);
+					blockOut[1] = (unsigned char)(c >> 8);
+					blockOut[2] = (unsigned char)(c & 0xff);
+					blockOut[3] = (unsigned char)(c >> 8);
+					blockOut[4] = blockOut[5] = blockOut[6] = blockOut[7] = 0;
+					continue;
+				}
+			}
+
 			int end[2][3];
 			block_endpoints(rgba, w, bx, by, end);
 

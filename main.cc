@@ -191,7 +191,31 @@ static CBFGroundTextures *tex = nullptr;
 static TextureBrowser browser;
 static UndoStack undoStack;
 static Stroke currentStroke;
-static std::set<int> strokeSeen;
+// "Already recorded in this stroke" flags, one per map element. A byte vector is
+// far faster than a set when a whole map rectangle is filled at once.
+static std::vector<unsigned char> strokeSeen;
+static std::vector<int> strokeSeenOrder;
+
+static void clearStrokeSeen()
+{
+	for (size_t i = 0; i < strokeSeenOrder.size(); ++i)
+		strokeSeen[(size_t)strokeSeenOrder[i]] = 0;
+	strokeSeenOrder.clear();
+}
+
+// Returns true the first time an element is touched in the current stroke.
+static bool markStrokeSeen(int index)
+{
+	if (index < 0)
+		return false;
+	if ((size_t)index >= strokeSeen.size())
+		strokeSeen.resize((size_t)index + 1, 0);
+	if (strokeSeen[(size_t)index])
+		return false;
+	strokeSeen[(size_t)index] = 1;
+	strokeSeenOrder.push_back(index);
+	return true;
+}
 
 static Terrain terrain;
 static FlatRenderer ui;
@@ -473,9 +497,8 @@ static void SetM(CSmfReadMap *m, int x_, int y_, float value)
 		return;
 
 	int i = (m->width / 2) * y + x;
-	if (!strokeSeen.count(i))
+	if (markStrokeSeen(i))
 	{
-		strokeSeen.insert(i);
 		currentStroke.type = EDIT_METAL;
 		currentStroke.index.push_back(i);
 		currentStroke.oldValue.push_back((float)metalmap[i]);
@@ -491,9 +514,8 @@ static void SetH(CSmfReadMap *m, int x, int y, float value)
 		return;
 
 	int i = (gs->mapx + 1) * y + x;
-	if (!strokeSeen.count(i))
+	if (markStrokeSeen(i))
 	{
-		strokeSeen.insert(i);
 		currentStroke.type = EDIT_HEIGHT;
 		currentStroke.index.push_back(i);
 		currentStroke.oldValue.push_back(m->heightmap[i]);
@@ -700,9 +722,8 @@ static void applyAt(int x, int y, double w)
 	unsigned char old[4];
 	tex->getPaintTexel(paintIndex, old);
 
-	if (!strokeSeen.count(paintIndex))
+	if (markStrokeSeen(paintIndex))
 	{
-		strokeSeen.insert(paintIndex);
 		currentStroke.type = EDIT_PAINT;
 		currentStroke.index.push_back(paintIndex);
 		currentStroke.oldValue.push_back((float)old[0]);
@@ -746,7 +767,7 @@ static void commitStroke()
 	currentStroke.index.clear();
 	currentStroke.oldValue.clear();
 	currentStroke.type = EDIT_HEIGHT;
-	strokeSeen.clear();
+	clearStrokeSeen();
 
 	tex->uploadPaintLayers();
 	rebuildMetalTexture();
@@ -1328,7 +1349,7 @@ static void loadMap(const std::string &path)
 	undoStack.clear();
 	currentStroke.index.clear();
 	currentStroke.oldValue.clear();
-	strokeSeen.clear();
+	clearStrokeSeen();
 	painting = false;
 	rectActive = false;
 	browser.DestroyGLTextures();
@@ -1376,7 +1397,12 @@ static void loadMap(const std::string &path)
 	camRotX = 55.0f;
 	camRotY = 20.0f;
 	camRotZ = 0.0f;
-	camDist = 17.0f;
+	// Frame the map: the default distance only suits small maps.
+	{
+		float mapUnitsX = map->width * 8 / 1024.0f * 2.0f;
+		float mapUnitsZ = map->height * 8 / 1024.0f * 2.0f;
+		camDist = std::max(17.0f, std::max(mapUnitsX, mapUnitsZ) * 0.9f);
+	}
 	pivx = map->width * 8 / 1024.0;
 	pivy = 0.0f;
 	pivz = map->height * 8 / 1024.0;

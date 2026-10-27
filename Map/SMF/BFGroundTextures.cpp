@@ -278,29 +278,29 @@ bool CBFGroundTextures::buildColormap(std::vector<unsigned char> &rgb)
 		rgb = importedColormap;
 	} else
 	{
-	std::vector<unsigned char> texel(32 * 32 * 4);
-	for (int ty = 0; ty < tileMapYSize; ++ty)
-	{
-		for (int tx = 0; tx < tileMapXSize; ++tx)
+		std::vector<unsigned char> texel(32 * 32 * 4);
+		for (int ty = 0; ty < tileMapYSize; ++ty)
 		{
-			int index = tileMap[(size_t)ty * tileMapXSize + tx];
-			const unsigned char *tile = &tiles[(size_t)index * SMALL_TILE_SIZE];
-			dxt1_decode(tile, 32, 32, texel.data());
-
-			for (int y = 0; y < 32; ++y)
+			for (int tx = 0; tx < tileMapXSize; ++tx)
 			{
-				size_t row = (size_t)(ty * 32 + y) * width + (size_t)tx * 32;
-				for (int x = 0; x < 32; ++x)
+				int index = tileMap[(size_t)ty * tileMapXSize + tx];
+				const unsigned char *tile = &tiles[(size_t)index * SMALL_TILE_SIZE];
+				dxt1_decode(tile, 32, 32, texel.data());
+
+				for (int y = 0; y < 32; ++y)
 				{
-					const unsigned char *src = &texel[((size_t)y * 32 + x) * 4];
-					unsigned char *dst = &rgb[(row + x) * 3];
-					dst[0] = src[0];
-					dst[1] = src[1];
-					dst[2] = src[2];
+					size_t row = (size_t)(ty * 32 + y) * width + (size_t)tx * 32;
+					for (int x = 0; x < 32; ++x)
+					{
+						const unsigned char *src = &texel[((size_t)y * 32 + x) * 4];
+						unsigned char *dst = &rgb[(row + x) * 3];
+						dst[0] = src[0];
+						dst[1] = src[1];
+						dst[2] = src[2];
+					}
 				}
 			}
 		}
-	}
 	}
 
 	// Blend the painted colours over the tiles, the same way the shader does.
@@ -697,11 +697,47 @@ void CBFGroundTextures::LoadSquare(int x, int y, int level)
 		                       size * size / 2, buf.data());
 	}
 
-	// The tile file stops at 128x128. Generate the remaining levels so the
-	// texture is complete down to 1x1: without them the sampler clamps to the
-	// smallest level when the square is far away and the ground turns into
-	// speckle noise.
-	glGenerateMipmap(GL_TEXTURE_2D);
+	// The tile file stops at 128x128. Build the remaining levels from the last
+	// one on the CPU: glGenerateMipmap would regenerate all of them (which is
+	// very slow on software renderers), while these are six tiny images.
+	{
+		std::vector<unsigned char> level3((size_t)128 * 128 * 4);
+		{
+			std::vector<GLubyte> small((size_t)128 * 128 / 2, 0);
+			for (int y1 = 0; y1 < 32; ++y1)
+			{
+				for (int x1 = 0; x1 < 32; ++x1)
+				{
+					const unsigned char *tile =
+					    &tiles[(size_t)tileMap[(x1 + x * 32) + (y1 + y * 32) * tileMapXSize] *
+					               SMALL_TILE_SIZE +
+					           tileoffset[3]];
+					GLint *sbuf = (GLint *)&tile[0];
+					GLint *dbuf = (GLint *)&small[((size_t)x1 + (size_t)y1 * 32) * 8];
+					dbuf[0] = sbuf[0];
+					dbuf[1] = sbuf[1];
+				}
+			}
+			dxt1_decode(small.data(), 128, 128, level3.data());
+		}
+
+		std::vector<unsigned char> level = level3;
+		int size = 128;
+		for (int mip = 4; mip < 10 && size >= 8; ++mip)
+		{
+			std::vector<unsigned char> next((size_t)(size / 2) * (size / 2) * 4);
+			dxt1_downsample(level.data(), size, size, next.data());
+			level.swap(next);
+			size /= 2;
+			std::vector<unsigned char> packed((size_t)size * size / 2);
+			dxt1_encode(level.data(), size, size, packed.data());
+			glCompressedTexImage2D(GL_TEXTURE_2D, mip, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, size, size,
+			                       0, (GLsizei)packed.size(), packed.data());
+		}
+	}
+
+	// DXT1 has no levels below 4x4, so the chain ends at level 8 (1024 >> 8 == 4).
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 8);
 
 	square->texLevel = 0;
 }
