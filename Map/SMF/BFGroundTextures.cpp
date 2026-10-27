@@ -330,7 +330,7 @@ static float bilinear(const std::vector<unsigned char> &data, int size, float u,
 	return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
 }
 
-bool CBFGroundTextures::bakePaint()
+bool CBFGroundTextures::bakePaint(BakeProgressFn progress, void *user)
 {
 	int tilesPer = tilesPerBigSquare(); // 32 tiles per big square side
 	bool changed = false;
@@ -340,6 +340,8 @@ bool CBFGroundTextures::bakePaint()
 
 	for (int by = 0; by < numBigTexY; ++by)
 	{
+		if (progress)
+			progress(by, numBigTexY, user);
 		for (int bx = 0; bx < numBigTexX; ++bx)
 		{
 			const PaintLayer &layer = paint[by * numBigTexX + bx];

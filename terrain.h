@@ -28,6 +28,10 @@ class Terrain {
 	// Builds the mesh for the whole map at a middle level of detail.
 	void build(CSmfReadMap *map, CBFGroundTextures *textures);
 
+	// The world height range the normalised height map is mapped onto. Must be
+	// set before build() and again whenever the range changes.
+	void setHeightRange(float minZ, float maxZ);
+
 	// Refines the level of detail of the squares from their apparent size.
 	// Levels are clamped to [3, 10] (level 3 is one quad per map square) and
 	// shifted by `bias`, where a negative bias is finer. A few squares are
@@ -61,6 +65,9 @@ class Terrain {
 		float screenSize = 0.0f; // approximate width on screen, in pixels
 	};
 
+	// Height of a map square in world units.
+	float worldHeight(int x, int y) const;
+
 	void buildSquare(int bx, int by, int lod, const int neighbourLod[4], std::vector<float> &out);
 	void uploadSquare(int index, int lod);
 
@@ -68,6 +75,7 @@ class Terrain {
 	CSmfReadMap *map = nullptr;
 	CBFGroundTextures *textures = nullptr;
 	int bigX = 0, bigY = 0;
+	float minZ = 0.0f, maxZ = 1.0f;
 
 	std::vector<BigSquare> squares;
 	std::vector<char> dirty;

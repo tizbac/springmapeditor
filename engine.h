@@ -8,7 +8,9 @@
 #define ENGINE_H
 
 #include <GL/glew.h>
+
 #include <SDL3/SDL.h>
+#include <string>
 
 #include "mat4.h"
 
@@ -20,6 +22,8 @@ class engine {
 
 	// Pixels reserved along the bottom of the window for the editor bar.
 	int barHeight = 0;
+	// Pixels reserved at the top for the menu bar.
+	int menuHeight = 0;
 
 	float camx = 0.0f, camy = 0.0f, camz = 0.0f;
 	float pivx = 0.0f, pivy = 0.0f, pivz = 0.0f;
@@ -35,12 +39,19 @@ class engine {
 	bool ctrl = false, shift = false;
 	bool keyPressed[SDL_SCANCODE_COUNT] = {};
 
+	// Text typed since the last poll, for the editor's numeric fields.
+	std::string textInput;
+	bool backspacePressed = false;
+	bool enterPressed = false;
+	bool escapePressed = false;
+
 	Mat4 view, projection, vp, invVP;
 	float frustum[6][4];
 
 	unsigned long long cleartime = 0, rendertime = 0;
 	bool fullscreen = false;
 	bool quit = false;
+	bool closeRequested = false;
 
 	SDL_Window *screen = nullptr;
 	SDL_GLContext context = nullptr;
@@ -61,6 +72,12 @@ class engine {
 
 	void clearscreen(float r = 0.0f, float g = 0.0f, float b = 0.0f, float a = 1.0f);
 	void setBarHeight(int pixels);
+	void setMenuHeight(int pixels);
+	// Top of the 3D view in window coordinates.
+	int viewTop() const
+	{
+		return this->height - this->menuHeight;
+	}
 
 	// Rebuilds the view/projection matrices and the frustum from the camera
 	// parameters. Must be called before drawing the 3D scene.

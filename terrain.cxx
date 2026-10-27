@@ -21,19 +21,11 @@ const int kMaxLod = 10; // one quad per big square
 const float kTargetQuadPixels = 3.0f;
 // Squares rebuilt per updateLods() call, so a big zoom change does not stall.
 const int kRebuildsPerCall = 12;
+// One world unit is 64 map squares, and a map square is 8 elmos, so heights
+// (which are stored in elmos) are divided by this to share the ground plane's
+// scale.
+const float kElmosPerUnit = 512.0f;
 } // namespace
-
-static float mapHeight(CSmfReadMap *map, int x, int y)
-{
-	if (x < 0 || y < 0)
-		return 0.0f;
-	if (x > gs->mapx || y > gs->mapy)
-		return 0.0f;
-	float f = map->heightmap[(gs->mapx + 1) * y + x];
-	if (f > 20)
-		f = 0.0f;
-	return f;
-}
 
 static void pushVertex(std::vector<float> &v, float x, float y, float z, float nx, float ny,
                        float nz, float u, float vv)
@@ -78,6 +70,27 @@ bool Terrain::init()
 	return true;
 }
 
+void Terrain::setHeightRange(float minZ_, float maxZ_)
+{
+	minZ = minZ_;
+	maxZ = maxZ_;
+	if (maxZ - minZ < 0.01f)
+		maxZ = minZ + 0.01f;
+}
+
+float Terrain::worldHeight(int x, int y) const
+{
+	if (x < 0 || y < 0 || x > gs->mapx || y > gs->mapy)
+		return minZ;
+
+	float f = map->heightmap[(gs->mapx + 1) * y + x];
+	if (f < 0.0f)
+		f = 0.0f;
+	if (f > 1.0f)
+		f = 1.0f;
+	return (minZ + f * (maxZ - minZ)) / kElmosPerUnit;
+}
+
 void Terrain::buildSquare(int bx, int by, int lod, const int neighbourLod[4],
                           std::vector<float> &out)
 {
@@ -85,34 +98,30 @@ void Terrain::buildSquare(int bx, int by, int lod, const int neighbourLod[4],
 	if (sqsize < 1)
 		sqsize = 1;
 
-	const float quadWidth = 2.0f / (float)sqsize;
 	const int step = 128 / sqsize < 1 ? 1 : 128 / sqsize;
+	const float quadWidth = 2.0f / (float)sqsize;
+	const int n = sqsize + 1;
 
-	// Sample the four borders along the map grid, then let them follow the
-	// neighbour when it is coarser: a fine square and a coarse square do not
-	// share vertices along their border, so a fine border vertex that sits on
-	// the coarse neighbour's straight edge segment is what keeps the surfaces
-	// watertight.
 	const int baseX = bx * 128;
 	const int baseY = by * 128;
 
-	auto sampleFront = [&](int d) { return mapHeight(map, baseX + 1 + d, baseY - 1); };
-	auto sampleBack = [&](int d) { return mapHeight(map, baseX + 1 + d, baseY + 127); };
-	auto sampleLeft = [&](int d) { return mapHeight(map, baseX + 1, baseY - 1 + d); };
-	auto sampleRight = [&](int d) { return mapHeight(map, baseX + 129, baseY - 1 + d); };
-
-	std::vector<float> edgeFront((size_t)sqsize + 1, 0.0f), edgeBack((size_t)sqsize + 1, 0.0f);
-	std::vector<float> edgeLeft((size_t)sqsize + 1, 0.0f), edgeRight((size_t)sqsize + 1, 0.0f);
-	for (int i = 0; i <= sqsize; ++i)
+	// Height of every grid point, in world units.
+	std::vector<float> h((size_t)n * n);
+	for (int Y = 0; Y < n; ++Y)
 	{
-		int d = i * step;
-		edgeFront[(size_t)i] = sampleFront(d);
-		edgeBack[(size_t)i] = sampleBack(d);
-		edgeLeft[(size_t)i] = sampleLeft(d);
-		edgeRight[(size_t)i] = sampleRight(d);
+		for (int X = 0; X < n; ++X)
+			h[(size_t)Y * n + X] = worldHeight(baseX + 1 + X * step, baseY - 1 + Y * step);
 	}
 
-	auto snapEdge = [&](std::vector<float> &edge, int nLod, auto sample) {
+	// A fine square and a coarse neighbour do not share the vertices along their
+	// border, so let the fine border follow the coarse neighbour's edge segments:
+	// that keeps the surfaces watertight.
+	auto sampleFront = [&](int d) { return worldHeight(baseX + 1 + d, baseY - 1); };
+	auto sampleBack = [&](int d) { return worldHeight(baseX + 1 + d, baseY + 127); };
+	auto sampleLeft = [&](int d) { return worldHeight(baseX + 1, baseY - 1 + d); };
+	auto sampleRight = [&](int d) { return worldHeight(baseX + 129, baseY - 1 + d); };
+
+	auto snapEdge = [&](float *edge, int nLod, auto sample) {
 		if (nLod <= lod)
 			return;
 		int nSize = 1024 >> nLod;
@@ -122,87 +131,96 @@ void Terrain::buildSquare(int bx, int by, int lod, const int neighbourLod[4],
 		if (nStep < 1)
 			nStep = 1;
 
-		for (int i = 0; i <= sqsize; ++i)
+		for (int i = 0; i < n; ++i)
 		{
 			int d = i * step;
 			int k = d / nStep;
 			int frac = d - k * nStep;
 			float h0 = (float)sample(k * nStep);
 			float h1 = (float)sample((k + 1) * nStep);
-			edge[(size_t)i] = h0 + (h1 - h0) * (float)frac / (float)nStep;
+			edge[i] = h0 + (h1 - h0) * (float)frac / (float)nStep;
 		}
 	};
 
-	snapEdge(edgeFront, neighbourLod[0], sampleFront);
-	snapEdge(edgeBack, neighbourLod[1], sampleBack);
-	snapEdge(edgeLeft, neighbourLod[2], sampleLeft);
-	snapEdge(edgeRight, neighbourLod[3], sampleRight);
+	if (neighbourLod[0] > lod)
+		snapEdge(&h[0], neighbourLod[0], sampleFront);
+	if (neighbourLod[1] > lod)
+		snapEdge(&h[(size_t)sqsize * n], neighbourLod[1], sampleBack);
+	{
+		std::vector<float> column((size_t)n);
+		if (neighbourLod[2] > lod)
+		{
+			for (int i = 0; i < n; ++i)
+				column[(size_t)i] = h[(size_t)i * n];
+			snapEdge(column.data(), neighbourLod[2], sampleLeft);
+			for (int i = 0; i < n; ++i)
+				h[(size_t)i * n] = column[(size_t)i];
+		}
+		if (neighbourLod[3] > lod)
+		{
+			for (int i = 0; i < n; ++i)
+				column[(size_t)i] = h[(size_t)i * n + sqsize];
+			snapEdge(column.data(), neighbourLod[3], sampleRight);
+			for (int i = 0; i < n; ++i)
+				h[(size_t)i * n + sqsize] = column[(size_t)i];
+		}
+	}
+
+	// Smooth normals from the height grid: the central differences give one
+	// normal per vertex, so the ground is shaded without visible facets.
+	std::vector<float> normals((size_t)n * n * 3);
+	const float inv2w = 1.0f / (2.0f * quadWidth);
+	for (int Y = 0; Y < n; ++Y)
+	{
+		for (int X = 0; X < n; ++X)
+		{
+			float hl = X > 0 ? h[(size_t)Y * n + X - 1]
+			                 : worldHeight(baseX + 1 - step, baseY - 1 + Y * step);
+			float hr = X < sqsize
+			               ? h[(size_t)Y * n + X + 1]
+			               : worldHeight(baseX + 1 + (sqsize + 1) * step, baseY - 1 + Y * step);
+			float hd = Y > 0 ? h[(size_t)(Y - 1) * n + X]
+			                 : worldHeight(baseX + 1 + X * step, baseY - 1 - step);
+			float hu = Y < sqsize
+			               ? h[(size_t)(Y + 1) * n + X]
+			               : worldHeight(baseX + 1 + X * step, baseY - 1 + (sqsize + 1) * step);
+
+			float nx = -(hr - hl) * inv2w;
+			float nz = -(hu - hd) * inv2w;
+			float len = std::sqrt(nx * nx + 1.0f + nz * nz);
+			size_t i = ((size_t)Y * n + X) * 3;
+			normals[i + 0] = nx / len;
+			normals[i + 1] = 1.0f / len;
+			normals[i + 2] = nz / len;
+		}
+	}
+
+	const float x0 = bx * 2.0f;
+	const float z0 = by * 2.0f;
+	const float uStep = 1.0f / (float)sqsize;
 
 	for (int Y = 0; Y < sqsize; ++Y)
 	{
 		for (int X = 0; X < sqsize; ++X)
 		{
-			float z1 = mapHeight(map, baseX + X * step + 1, baseY + Y * step - 1);
-			float z2 = mapHeight(map, baseX + (X + 1) * step + 1, baseY + Y * step - 1);
-			float z3 = mapHeight(map, baseX + (X + 1) * step + 1, baseY + (Y + 1) * step - 1);
-			float z4 = mapHeight(map, baseX + X * step + 1, baseY + (Y + 1) * step - 1);
+			float px[4] = {x0 + (float)X * quadWidth, x0 + (float)(X + 1) * quadWidth,
+			               x0 + (float)(X + 1) * quadWidth, x0 + (float)X * quadWidth};
+			float pz[4] = {z0 + (float)Y * quadWidth, z0 + (float)Y * quadWidth,
+			               z0 + (float)(Y + 1) * quadWidth, z0 + (float)(Y + 1) * quadWidth};
+			const int gi[4] = {Y * n + X, Y * n + X + 1, (Y + 1) * n + X + 1, (Y + 1) * n + X};
+			float uu[4] = {(float)X * uStep, (float)(X + 1) * uStep, (float)(X + 1) * uStep,
+			               (float)X * uStep};
+			float vv[4] = {(float)Y * uStep, (float)Y * uStep, (float)(Y + 1) * uStep,
+			               (float)(Y + 1) * uStep};
 
-			if (Y == 0)
+			static const int order[6] = {0, 1, 2, 0, 2, 3};
+			for (int i = 0; i < 6; ++i)
 			{
-				z1 = edgeFront[(size_t)X];
-				z2 = edgeFront[(size_t)X + 1];
+				int c = order[i];
+				pushVertex(out, px[c], h[(size_t)gi[c]], pz[c], normals[(size_t)gi[c] * 3 + 0],
+				           normals[(size_t)gi[c] * 3 + 1], normals[(size_t)gi[c] * 3 + 2], uu[c],
+				           vv[c]);
 			}
-			if (Y == sqsize - 1)
-			{
-				z4 = edgeBack[(size_t)X];
-				z3 = edgeBack[(size_t)X + 1];
-			}
-			if (X == 0)
-			{
-				z1 = edgeLeft[(size_t)Y];
-				z4 = edgeLeft[(size_t)Y + 1];
-			}
-			if (X == sqsize - 1)
-			{
-				z2 = edgeRight[(size_t)Y];
-				z3 = edgeRight[(size_t)Y + 1];
-			}
-
-			float x1 = (float)X * quadWidth;
-			float x2 = (float)(X + 1) * quadWidth;
-			float y1 = (float)Y * quadWidth;
-			float y2 = (float)(Y + 1) * quadWidth;
-
-			float u1 = (float)X / (float)sqsize;
-			float v1 = (float)Y / (float)sqsize;
-			float u2 = (float)(X + 1) / (float)sqsize;
-			float v2 = (float)(Y + 1) / (float)sqsize;
-
-			// The local frame is (x, y, height); the world frame keeps x and y
-			// as the ground plane and turns the height axis into +y.
-			float ax = x2 - x1, ay = 0.0f, az = z2 - z1;
-			float bxv = x2 - x1, byv = y2 - y1, bzv = z3 - z1;
-			float nx = ay * bzv - az * byv;
-			float ny = az * bxv - ax * bzv;
-			float nz = ax * byv - ay * bxv;
-
-			pushVertex(out, bx * 2 + x1, z1, by * 2 + y1, nx, nz, ny, u1, v1);
-			pushVertex(out, bx * 2 + x2, z2, by * 2 + y1, nx, nz, ny, u2, v1);
-			pushVertex(out, bx * 2 + x2, z3, by * 2 + y2, nx, nz, ny, u2, v2);
-
-			ax = x1 - x2;
-			ay = 0.0f;
-			az = z4 - z3;
-			bxv = x1 - x2;
-			byv = y1 - y2;
-			bzv = z1 - z3;
-			nx = ay * bzv - az * byv;
-			ny = az * bxv - ax * bzv;
-			nz = ax * byv - ay * bxv;
-
-			pushVertex(out, bx * 2 + x2, z3, by * 2 + y2, nx, nz, ny, u2, v2);
-			pushVertex(out, bx * 2 + x1, z4, by * 2 + y2, nx, nz, ny, u1, v2);
-			pushVertex(out, bx * 2 + x1, z1, by * 2 + y1, nx, nz, ny, u1, v1);
 		}
 	}
 }
@@ -433,9 +451,11 @@ void Terrain::draw(CBFGroundTextures *ground, GLuint metalTexture, const Mat4 &v
 		glBindTexture(GL_TEXTURE_2D, paint);
 		shader.set("hasPaint", paint ? 1 : 0);
 
+		// A big square is 128 map squares, and the metal map has one texel per
+		// two map squares, so it covers 64 by 64 texels of it.
 		shader.set("uMetalOffset", (float)(bx * 64) / (float)metalWidth,
 		           (float)(by * 64) / (float)metalHeight);
-		shader.set("uMetalScale", 128.0f / (float)metalWidth, 128.0f / (float)metalHeight);
+		shader.set("uMetalScale", 64.0f / (float)metalWidth, 64.0f / (float)metalHeight);
 
 		glBindVertexArray(sq.vao);
 		glDrawArrays(GL_TRIANGLES, 0, sq.count);

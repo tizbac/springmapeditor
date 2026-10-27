@@ -46,6 +46,9 @@ bool engine::Init3d(int width, int height, int bpp, bool fullscreen)
 
 	SDL_GL_SetSwapInterval(1);
 
+	// Needed for the editor's numeric text fields.
+	SDL_StartTextInput(this->screen);
+
 	if (this->fullscreen)
 		SDL_SetWindowFullscreen(this->screen, true);
 
@@ -201,9 +204,23 @@ void engine::clearscreen(float r, float g, float b, float a)
 			this->wdown = ev.wheel.y < 0;
 			break;
 
+		case SDL_EVENT_TEXT_INPUT:
+			this->textInput += ev.text.text;
+			break;
+
 		case SDL_EVENT_KEY_DOWN:
 			if (!ev.key.repeat && ev.key.scancode < SDL_SCANCODE_COUNT)
 				this->keyPressed[ev.key.scancode] = true;
+			if (!ev.key.repeat)
+			{
+				if (ev.key.scancode == SDL_SCANCODE_BACKSPACE)
+					this->backspacePressed = true;
+				else if (ev.key.scancode == SDL_SCANCODE_RETURN ||
+				         ev.key.scancode == SDL_SCANCODE_KP_ENTER)
+					this->enterPressed = true;
+				else if (ev.key.scancode == SDL_SCANCODE_ESCAPE)
+					this->escapePressed = true;
+			}
 			// fall through
 		case SDL_EVENT_KEY_UP:
 			switch (ev.key.scancode)
@@ -244,7 +261,7 @@ void engine::clearscreen(float r, float g, float b, float a)
 			break;
 
 		case SDL_EVENT_QUIT:
-			this->quit = true;
+			this->closeRequested = true;
 			break;
 
 		default:
@@ -262,9 +279,16 @@ void engine::setBarHeight(int pixels)
 	this->barHeight = pixels;
 }
 
+void engine::setMenuHeight(int pixels)
+{
+	if (pixels < 0)
+		pixels = 0;
+	this->menuHeight = pixels;
+}
+
 void engine::viewport3D() const
 {
-	int h = this->height - this->barHeight;
+	int h = this->viewTop() - this->barHeight;
 	if (h < 1)
 		h = 1;
 	glViewport(0, this->barHeight, this->width, h);
@@ -277,8 +301,8 @@ void engine::viewportBar() const
 
 void engine::updateCamera()
 {
-	float aspect = (float)this->width /
-	               (float)(this->height - this->barHeight > 0 ? this->height - this->barHeight : 1);
+	int vh = this->viewTop() - this->barHeight;
+	float aspect = (float)this->width / (float)(vh > 0 ? vh : 1);
 
 	// The depth range follows the orbit distance: a fixed near plane close to
 	// the eye and a far plane far beyond the map keeps the terrain from being
@@ -356,14 +380,14 @@ bool engine::pickGround(int px, int py, double *ox, double *oy, double *oz) cons
 		return false;
 
 	int gy = this->height - 1 - py; // GL window coordinates, origin bottom left
-	if (gy < this->barHeight)
+	if (gy < this->barHeight || gy >= this->viewTop())
 		return false;
 
 	float depth = 1.0f;
 	glReadPixels(px, gy, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
 
 	int vpW = this->width;
-	int vpH = this->height - this->barHeight;
+	int vpH = this->viewTop() - this->barHeight;
 	if (vpH < 1)
 		return false;
 
@@ -403,7 +427,7 @@ bool engine::pickGround(int px, int py, double *ox, double *oy, double *oz) cons
 bool engine::groundPoint(int px, int py, float *x, float *z) const
 {
 	int vpW = this->width;
-	int vpH = this->height - this->barHeight;
+	int vpH = this->viewTop() - this->barHeight;
 	if (vpH < 1 || px < 0 || px >= vpW || py < 0 || py >= vpH)
 		return false;
 

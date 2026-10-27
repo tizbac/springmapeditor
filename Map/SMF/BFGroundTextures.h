@@ -91,7 +91,9 @@ class CBFGroundTextures {
 
 	// Fold the paint layers into the tile map, appending the newly created
 	// tiles to the tile storage. Returns true if anything changed.
-	bool bakePaint();
+	// Called after every big square is baked, so the editor can show progress.
+	typedef void (*BakeProgressFn)(int done, int total, void *user);
+	bool bakePaint(BakeProgressFn progress = nullptr, void *user = nullptr);
 	// Write the tile storage back to the .smt file(s) and update the tile map
 	// inside the .smf.
 	bool writeTileFiles(const std::string &smfPath);
@@ -121,7 +123,6 @@ class CBFGroundTextures {
 	int currentPBO;
 
 	float anisotropy;
-
 };
 
 #endif // __BF_GROUND_TEXTURES_H__
