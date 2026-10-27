@@ -3380,7 +3380,7 @@ int main(int argc, char **argv)
 			}
 
 			if (Main->getkeydown(SDL_SCANCODE_ESCAPE))
-				Main->quit = true;
+				requestQuit();
 			if (Main->getkeydown(SDL_SCANCODE_F))
 				Main->ToggleFullScreen();
 		}
