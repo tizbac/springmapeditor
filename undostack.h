@@ -95,13 +95,24 @@ class UndoStack {
 	}
 
   private:
+	// Bound both the number of strokes and the memory they use: a full map
+	// stroke can hold hundreds of thousands of values.
 	static const size_t maxStrokes = 128;
+	static const size_t maxFloats = 4000000;
 	std::vector<Stroke> undo;
 	std::vector<Stroke> redo;
 
+	size_t storedFloats() const
+	{
+		size_t total = 0;
+		for (size_t i = 0; i < undo.size(); ++i)
+			total += undo[i].index.size() + undo[i].oldValue.size();
+		return total;
+	}
+
 	void trim()
 	{
-		if (undo.size() > maxStrokes)
+		while (undo.size() > maxStrokes || (undo.size() > 1 && storedFloats() > maxFloats))
 			undo.erase(undo.begin());
 	}
 };
