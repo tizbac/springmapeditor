@@ -1377,6 +1377,7 @@ int main(int argc, char **argv)
 	{
 		glViewport(0, 0, Main->width, Main->height);
 		Main->clearscreen(0.22f, 0.23f, 0.26f, 1.0f);
+		Main->setBarHeight(Main->height / 5);
 
 		// --- camera ---
 		if (Main->mouseright && !orbiting)

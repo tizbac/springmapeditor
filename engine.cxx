@@ -232,6 +232,16 @@ void engine::clearscreen(float r, float g, float b, float a)
 			}
 			break;
 
+		case SDL_EVENT_WINDOW_RESIZED:
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			if (ev.window.data1 > 0 && ev.window.data2 > 0)
+			{
+				this->width = ev.window.data1;
+				this->height = ev.window.data2;
+				this->setBarHeight(this->height / 5);
+			}
+			break;
+
 		case SDL_EVENT_QUIT:
 			this->quit = true;
 			break;
