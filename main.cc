@@ -281,8 +281,28 @@ static float infoMinWind = 5.0f;
 static float infoMaxWind = 25.0f;
 
 // Text editing state for the map info fields.
-enum InfoField { FIELD_TIDAL = 0, FIELD_MAXMETAL, FIELD_MINWIND, FIELD_MAXWIND, FIELD_COUNT };
-static float infoValues[FIELD_COUNT] = {0.0f, 0.02f, 5.0f, 25.0f};
+enum InfoField {
+	FIELD_TIDAL = 0,
+	FIELD_MAXMETAL,
+	FIELD_MINWIND,
+	FIELD_MAXWIND,
+	FIELD_SUN_X,
+	FIELD_SUN_Y,
+	FIELD_SUN_Z,
+	FIELD_AMBIENT_R,
+	FIELD_AMBIENT_G,
+	FIELD_AMBIENT_B,
+	FIELD_DIFFUSE_R,
+	FIELD_DIFFUSE_G,
+	FIELD_DIFFUSE_B,
+	FIELD_COUNT
+};
+static float infoValues[FIELD_COUNT] = {
+    0.0f, 0.02f, 5.0f, 25.0f, // tidal, max metal, min wind, max wind
+    0.0f, 1.0f,  2.0f,        // sun direction, engine default
+    0.5f, 0.5f,  0.5f,        // ground ambient colour
+    0.5f, 0.5f,  0.5f         // ground diffuse colour
+};
 static int activeField = -1;
 static std::string fieldText;
 static int activeSlider = -1;
@@ -571,6 +591,33 @@ static void addStartPosition(double worldX, double worldZ)
 	startPositions.push_back(std::make_pair(x, z));
 	dirty = true;
 	printf("Start position %d at %.0f,%.0f\n", (int)startPositions.size(), x, z);
+}
+
+// Removes every start position inside the brush area around the cursor.
+static int removeStartPositionsInBrush(double worldX, double worldZ)
+{
+	float radius = (float)(brushsize * kElmosPerUnitSP);
+	float radius2 = radius * radius;
+	float cx = (float)(worldX * kElmosPerUnitSP);
+	float cz = (float)(worldZ * kElmosPerUnitSP);
+
+	int removed = 0;
+	for (size_t i = 0; i < startPositions.size();)
+	{
+		float dx = startPositions[i].first - cx;
+		float dz = startPositions[i].second - cz;
+		if (dx * dx + dz * dz <= radius2)
+		{
+			startPositions.erase(startPositions.begin() + (long)i);
+			++removed;
+		} else
+		{
+			++i;
+		}
+	}
+	if (removed > 0)
+		dirty = true;
+	return removed;
 }
 
 static bool removeStartPosition(double worldX, double worldZ)
@@ -1251,6 +1298,37 @@ static void loadMapInfo()
 	infoValues[FIELD_MINWIND] = floatOrDefault(lines, "ATMOSPHERE", "MinWind", 5.0f);
 	infoValues[FIELD_MAXWIND] = floatOrDefault(lines, "ATMOSPHERE", "MaxWind", 25.0f);
 
+	// [LIGHT] section, with the same defaults and key names as Spring.
+	{
+		std::string value;
+		float vec[3];
+		if (tdfGet(lines, "LIGHT", "SunDir", value) &&
+		    sscanf(value.c_str(), "%f %f %f", &vec[0], &vec[1], &vec[2]) == 3)
+		{
+			infoValues[FIELD_SUN_X] = vec[0];
+			infoValues[FIELD_SUN_Y] = vec[1];
+			infoValues[FIELD_SUN_Z] = vec[2];
+		}
+		if (tdfGet(lines, "LIGHT", "GroundAmbientColor", value) &&
+		    sscanf(value.c_str(), "%f %f %f", &vec[0], &vec[1], &vec[2]) == 3)
+		{
+			infoValues[FIELD_AMBIENT_R] = vec[0];
+			infoValues[FIELD_AMBIENT_G] = vec[1];
+			infoValues[FIELD_AMBIENT_B] = vec[2];
+		}
+		bool haveDiffuse = false;
+		if (tdfGet(lines, "LIGHT", "GroundDiffuseColor", value))
+			haveDiffuse = sscanf(value.c_str(), "%f %f %f", &vec[0], &vec[1], &vec[2]) == 3;
+		if (!haveDiffuse && tdfGet(lines, "LIGHT", "GroundSunColor", value))
+			haveDiffuse = sscanf(value.c_str(), "%f %f %f", &vec[0], &vec[1], &vec[2]) == 3;
+		if (haveDiffuse)
+		{
+			infoValues[FIELD_DIFFUSE_R] = vec[0];
+			infoValues[FIELD_DIFFUSE_G] = vec[1];
+			infoValues[FIELD_DIFFUSE_B] = vec[2];
+		}
+	}
+
 	// Start positions: [TEAMn] blocks with StartPosX/StartPosZ (elmos).
 	startPositions.clear();
 	{
@@ -1279,6 +1357,35 @@ static void loadMapInfo()
 		waterHeight = (float)atof(water.c_str());
 }
 
+static TerrainLight mapSunLight()
+{
+	TerrainLight light;
+	light.dir[0] = infoValues[FIELD_SUN_X];
+	light.dir[1] = infoValues[FIELD_SUN_Y];
+	light.dir[2] = infoValues[FIELD_SUN_Z];
+	float length = std::sqrt(light.dir[0] * light.dir[0] + light.dir[1] * light.dir[1] +
+	                         light.dir[2] * light.dir[2]);
+	if (length < 1e-6f)
+	{
+		light.dir[0] = 0.0f;
+		light.dir[1] = 1.0f;
+		light.dir[2] = 0.0f;
+	} else
+	{
+		light.dir[0] /= length;
+		light.dir[1] /= length;
+		light.dir[2] /= length;
+	}
+
+	light.ambient[0] = infoValues[FIELD_AMBIENT_R];
+	light.ambient[1] = infoValues[FIELD_AMBIENT_G];
+	light.ambient[2] = infoValues[FIELD_AMBIENT_B];
+	light.diffuse[0] = infoValues[FIELD_DIFFUSE_R];
+	light.diffuse[1] = infoValues[FIELD_DIFFUSE_G];
+	light.diffuse[2] = infoValues[FIELD_DIFFUSE_B];
+	return light;
+}
+
 static void saveMapInfo()
 {
 	std::vector<std::string> lines = readLines(mapInfoPath());
@@ -1292,6 +1399,18 @@ static void saveMapInfo()
 	tdfSet(lines, "ATMOSPHERE", "MinWind", buf);
 	snprintf(buf, sizeof(buf), "%g", infoValues[FIELD_MAXWIND]);
 	tdfSet(lines, "ATMOSPHERE", "MaxWind", buf);
+
+	char light[128];
+	snprintf(light, sizeof(light), "%g %g %g", infoValues[FIELD_SUN_X], infoValues[FIELD_SUN_Y],
+	         infoValues[FIELD_SUN_Z]);
+	tdfSet(lines, "LIGHT", "SunDir", light);
+	snprintf(light, sizeof(light), "%g %g %g", infoValues[FIELD_AMBIENT_R],
+	         infoValues[FIELD_AMBIENT_G], infoValues[FIELD_AMBIENT_B]);
+	tdfSet(lines, "LIGHT", "GroundAmbientColor", light);
+	snprintf(light, sizeof(light), "%g %g %g", infoValues[FIELD_DIFFUSE_R],
+	         infoValues[FIELD_DIFFUSE_G], infoValues[FIELD_DIFFUSE_B]);
+	tdfSet(lines, "LIGHT", "GroundSunColor", light);
+	tdfSet(lines, "LIGHT", "GroundDiffuseColor", light);
 
 	// Rewrite the team blocks with the current start positions.
 	for (int i = 0; i < 64; ++i)
@@ -1319,14 +1438,14 @@ static void saveMapInfo()
 	writeLines(mapInfoPath(), lines);
 }
 
-// Refines the per square level of detail from how large each square is on
-// screen. Only the squares whose level actually changed are rebuilt, a few per
-// frame, so it is cheap enough to call every frame.
+// Retessellates the visible ROAM patches for the current camera. The terrain
+// keeps its vertex grid; only patch index buffers are rebuilt.
 static void refreshTerrainLods()
 {
 	if (!terrain.built() || !Main)
 		return;
-	terrain.updateLods(Main->view, Main->height - Main->barHeight, 60.0f, detail - 6);
+	terrain.updateLods(Main->view, Main->height - Main->barHeight, 60.0f, detail - 6,
+	                   Main->frustum);
 }
 
 static void loadMap(const std::string &path)
@@ -1837,7 +1956,7 @@ static void drawMapSettings()
 		return;
 
 	const float panelW = 400.0f;
-	const float panelH = 306.0f;
+	const float panelH = 306.0f + (float)(FIELD_COUNT - 4) * 28.0f;
 	const float x0 = 10.0f;
 	const float y1 = (float)Main->viewTop() - 10.0f;
 	const float y0 = y1 - panelH;
@@ -1878,8 +1997,9 @@ static void drawMapSettings()
 	addButton(controlX + sliderW + 14.0f, waterY + 1.0f, 44.0f, 18.0f, waterPresent ? "On" : "Off",
 	          waterPresent, ACT_WATER_TOGGLE);
 
-	static const char *fieldNames[FIELD_COUNT] = {"Tidal strength", "Max metal", "Min wind",
-	                                              "Max wind"};
+	static const char *fieldNames[FIELD_COUNT] = {
+	    "Tidal strength", "Max metal", "Min wind",  "Max wind",  "Sun X",     "Sun Y",    "Sun Z",
+	    "Ambient R",      "Ambient G", "Ambient B", "Diffuse R", "Diffuse G", "Diffuse B"};
 	for (int i = 0; i < FIELD_COUNT; ++i)
 	{
 		float yTop = mapRowY(y1, 3 + i);
@@ -1909,8 +2029,9 @@ static void drawMapSettings()
 		ui.text(fontSmall, text, controlX + sliderW + 12, yTop + 5, 0.85f, 0.9f, 0.95f, 1.0f);
 	}
 
-	static const char *fieldNames2[FIELD_COUNT] = {"Tidal strength", "Max metal", "Min wind",
-	                                               "Max wind"};
+	static const char *fieldNames2[FIELD_COUNT] = {
+	    "Tidal strength", "Max metal", "Min wind",  "Max wind",  "Sun X",     "Sun Y",    "Sun Z",
+	    "Ambient R",      "Ambient G", "Ambient B", "Diffuse R", "Diffuse G", "Diffuse B"};
 	for (int i = 0; i < FIELD_COUNT; ++i)
 	{
 		float yTop = mapRowY(y1, 3 + i);
@@ -2262,6 +2383,15 @@ static void writeMapInfo(const std::string &basePath, const std::string &mapName
 			}
 			fprintf(f, "}\n[ATMOSPHERE]\n{\n\tMinWind=%g;\n\tMaxWind=%g;\n}\n",
 			        infoValues[FIELD_MINWIND], infoValues[FIELD_MAXWIND]);
+			fprintf(f,
+			        "[LIGHT]\n{\n\tSunDir=%g %g %g;\n\tGroundAmbientColor=%g %g %g;\n"
+			        "\tGroundSunColor=%g %g %g;\n\tGroundDiffuseColor=%g %g %g;\n}\n",
+			        infoValues[FIELD_SUN_X], infoValues[FIELD_SUN_Y], infoValues[FIELD_SUN_Z],
+			        infoValues[FIELD_AMBIENT_R], infoValues[FIELD_AMBIENT_G],
+			        infoValues[FIELD_AMBIENT_B], infoValues[FIELD_DIFFUSE_R],
+			        infoValues[FIELD_DIFFUSE_G], infoValues[FIELD_DIFFUSE_B],
+			        infoValues[FIELD_DIFFUSE_R], infoValues[FIELD_DIFFUSE_G],
+			        infoValues[FIELD_DIFFUSE_B]);
 			if (waterPresent)
 				fprintf(f, "[WATER]\n{\n\tWaterPlaneHeight=%g;\n}\n", waterHeight);
 			fclose(f);
@@ -2282,6 +2412,16 @@ static void writeMapInfo(const std::string &basePath, const std::string &mapName
 		fprintf(lua, "\tgravity = 130,\n");
 		fprintf(lua, "\tatmosphere = {\n\t\tminWind = %g,\n\t\tmaxWind = %g,\n\t},\n",
 		        infoValues[FIELD_MINWIND], infoValues[FIELD_MAXWIND]);
+		fprintf(lua,
+		        "\tlighting = {\n"
+		        "\t\tsunDir = { %g, %g, %g },\n"
+		        "\t\tgroundAmbientColor = { %g, %g, %g },\n"
+		        "\t\tgroundDiffuseColor = { %g, %g, %g },\n"
+		        "\t},\n",
+		        infoValues[FIELD_SUN_X], infoValues[FIELD_SUN_Y], infoValues[FIELD_SUN_Z],
+		        infoValues[FIELD_AMBIENT_R], infoValues[FIELD_AMBIENT_G],
+		        infoValues[FIELD_AMBIENT_B], infoValues[FIELD_DIFFUSE_R],
+		        infoValues[FIELD_DIFFUSE_G], infoValues[FIELD_DIFFUSE_B]);
 		if (waterPresent)
 			fprintf(lua, "\twater = {\n\t\tplaneColor = { 0.0, 0.4, 0.0, 1.0 },\n\t},\n");
 		fprintf(lua, "\tsmf = {\n\t\tminHeight = %g,\n\t\tmaxHeight = %g,\n\t},\n", mapMinZ,
@@ -2555,8 +2695,6 @@ static bool loadPng32(const std::string &path, int w, int h, unsigned char *rgba
 	}
 	BYTE *bits = FreeImage_GetBits(rgb);
 	const int pitch = FreeImage_GetPitch(rgb);
-	for (int y = 0; y < h; ++h)
-		break;
 	for (int y = 0; y < h; ++y)
 	{
 		const BYTE *src = bits + (size_t)y * pitch;
@@ -2719,6 +2857,12 @@ static void saveProject(const std::string &dir)
 		fprintf(f, "maxMetal=%g\n", infoValues[FIELD_MAXMETAL]);
 		fprintf(f, "minWind=%g\n", infoValues[FIELD_MINWIND]);
 		fprintf(f, "maxWind=%g\n", infoValues[FIELD_MAXWIND]);
+		fprintf(f, "sunDir=%g %g %g\n", infoValues[FIELD_SUN_X], infoValues[FIELD_SUN_Y],
+		        infoValues[FIELD_SUN_Z]);
+		fprintf(f, "groundAmbient=%g %g %g\n", infoValues[FIELD_AMBIENT_R],
+		        infoValues[FIELD_AMBIENT_G], infoValues[FIELD_AMBIENT_B]);
+		fprintf(f, "groundDiffuse=%g %g %g\n", infoValues[FIELD_DIFFUSE_R],
+		        infoValues[FIELD_DIFFUSE_G], infoValues[FIELD_DIFFUSE_B]);
 		fprintf(f, "textures=%s\n", textureDir.c_str());
 		fclose(f);
 	}
@@ -2772,6 +2916,15 @@ static void openProject(const std::string &dir)
 				infoValues[FIELD_MINWIND] = (float)atof(value);
 			else if (strcmp(key, "maxWind") == 0)
 				infoValues[FIELD_MAXWIND] = (float)atof(value);
+			else if (strcmp(key, "sunDir") == 0)
+				sscanf(value, "%f %f %f", &infoValues[FIELD_SUN_X], &infoValues[FIELD_SUN_Y],
+				       &infoValues[FIELD_SUN_Z]);
+			else if (strcmp(key, "groundAmbient") == 0)
+				sscanf(value, "%f %f %f", &infoValues[FIELD_AMBIENT_R],
+				       &infoValues[FIELD_AMBIENT_G], &infoValues[FIELD_AMBIENT_B]);
+			else if (strcmp(key, "groundDiffuse") == 0)
+				sscanf(value, "%f %f %f", &infoValues[FIELD_DIFFUSE_R],
+				       &infoValues[FIELD_DIFFUSE_G], &infoValues[FIELD_DIFFUSE_B]);
 			else if (strcmp(key, "textures") == 0 && value[0])
 			{
 				textureDir = value;
@@ -3205,6 +3358,7 @@ static void drawHelpPanel()
 	    {"P", "brush shape"},
 	    {"- / =", "brush falloff"},
 	    {"0 1 2 3 4", "mode (4 = startpos)"},
+	    {"Del", "remove startpos in the brush"},
 	    {"T / Y", "terrain detail"},
 	    {"[ ]", "select texture"},
 	    {", .", "texture scale"},
@@ -3777,7 +3931,14 @@ int main(int argc, char **argv)
 					doUndo();
 			}
 
-			if (Main->getkeydown(SDL_SCANCODE_H))
+			if (Main->getkeydown(SDL_SCANCODE_DELETE) && mode == MODE_START && map)
+		{
+			int removed = removeStartPositionsInBrush(mx, mz);
+			if (removed > 0)
+				printf("Removed %d start position(s)\n", removed);
+		}
+
+		if (Main->getkeydown(SDL_SCANCODE_H))
 				helpVisible = !helpVisible;
 
 			if (Main->getkeydown(SDL_SCANCODE_ESCAPE))
@@ -3969,38 +4130,19 @@ int main(int argc, char **argv)
 
 		bool inView = haveMap && Main->mousey < Main->height - Main->barHeight && activeField < 0 &&
 		              dialog == DLG_NONE;
-		bool paintingMouse = Main->mouseleft && hit < 0 && inView && mode != MODE_START;
+		// A click that the interface took must not reach the brush: the tool stays
+		// disarmed until the next press that lands in the view.
+		static bool toolBlocked = false;
+		if (mousePressed)
+			toolBlocked = (hit >= 0);
 
-		// Start position editing: left adds one, a right click (as opposed to a
-		// right drag, which orbits) removes the nearest one.
-		static bool rightPending = false;
-		static int rightDownX = 0, rightDownY = 0;
-		bool rightEvent = Main->getmouserightdown();
+		bool paintingMouse =
+		    Main->mouseleft && hit < 0 && inView && mode != MODE_START && !toolBlocked;
 
-		if (mode == MODE_START && inView)
-		{
-			if (mousePressed)
-				addStartPosition(mx, mz);
-
-			if (rightEvent)
-			{
-				rightPending = true;
-				rightDownX = Main->mousex;
-				rightDownY = Main->mousey;
-			}
-			if (rightPending && !Main->mouseright)
-			{
-				int dx = Main->mousex - rightDownX;
-				int dy = Main->mousey - rightDownY;
-				rightPending = false;
-				// A right drag orbits instead, so only a click removes.
-				if (dx * dx + dy * dy < 36)
-					removeStartPosition(mx, mz);
-			}
-		} else
-		{
-			rightPending = false;
-		}
+		// Start position editing: left adds one on the ground under the cursor,
+		// Delete (handled with the keys) removes the nearest one.
+		if (mode == MODE_START && inView && mousePressed && !toolBlocked)
+			addStartPosition(mx, mz);
 
 		if (rectFill)
 		{
@@ -4054,7 +4196,8 @@ int main(int argc, char **argv)
 
 		Main->viewport3D();
 
-		terrain.draw(tex, metalTexture, Main->vp, mode, metalWidth, metalHeight, 0.0f, 1.0f, 0.0f,
+		const TerrainLight sunLight = mapSunLight();
+		terrain.draw(tex, metalTexture, Main->vp, mode, metalWidth, metalHeight, sunLight,
 		             Main->frustum);
 
 		// Pick the map square under the cursor from the depth buffer that was just

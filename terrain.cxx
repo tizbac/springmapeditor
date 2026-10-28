@@ -1,50 +1,35 @@
 /*
- * terrain.cxx - ground mesh built into one vertex buffer per big square.
+ * terrain.cxx - ROAM terrain mesh.
+ *
+ * This is a port of RecoilEngine's ROAM patch tessellation. Each 128x128 map
+ * square patch keeps a fixed full resolution vertex grid; a binary triangle
+ * tree selects the vertices used by the current level of detail and is turned
+ * into an index buffer. Changing LOD therefore only rebuilds indices, never
+ * vertices.
  */
 #include "terrain.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
+#include <cstring>
 
 #include "Map/GlobalStuff.h"
 #include "Map/SMF/BFGroundTextures.h"
 #include "Map/SMF/SmfReadMap.h"
 
 namespace {
-const int kDefaultLod = 6;
-const int kMinLod = 3;  // one quad per map square
-const int kMaxLod = 10; // one quad per big square
-// How large a quad should be on screen, in pixels. Used to pick the level of
-// detail of each square.
-const float kTargetQuadPixels = 8.0f;
-// Squares rebuilt per updateLods() call, plus a vertex budget, so a big zoom
-// change does not stall the frame for seconds.
-const int kRebuildsPerCall = 12;
-const long kVerticesPerCall = 60000;
-// One world unit is 64 map squares, and a map square is 8 elmos, so heights
-// (which are stored in elmos) are divided by this to share the ground plane's
-// scale.
+const int kDefaultViewRadius = 60;
+const int kMinViewRadius = 20;
+const int kMaxViewRadius = 120;
+// One map square is 1/64 world unit; ROAM's variance values are in elmos.
 const float kElmosPerUnit = 512.0f;
-} // namespace
-
-static void pushVertex(std::vector<float> &v, float x, float y, float z, float nx, float ny,
-                       float nz, float u, float vv)
-{
-	v.push_back(x);
-	v.push_back(y);
-	v.push_back(z);
-	v.push_back(nx);
-	v.push_back(ny);
-	v.push_back(nz);
-	v.push_back(u);
-	v.push_back(vv);
-}
+const float kWorldPerSquare = 1.0f / 64.0f;
 
 // True when the box is not entirely outside one of the frustum planes.
-static bool boxInView(const float frustum[6][4], float x0, float y0, float z0, float x1, float y1,
-                      float z1)
+bool boxInView(const float frustum[6][4], float x0, float y0, float z0, float x1, float y1,
+               float z1)
 {
 	for (int p = 0; p < 6; ++p)
 	{
@@ -58,12 +43,22 @@ static bool boxInView(const float frustum[6][4], float x0, float y0, float z0, f
 			if (d > best)
 				best = d;
 		}
-		// A small epsilon so a square that just touches a plane is kept.
 		if (best <= -0.01f)
 			return false;
 	}
 	return true;
 }
+
+bool viewChanged(const Mat4 &a, const Mat4 &b)
+{
+	for (int i = 0; i < 16; ++i)
+	{
+		if (std::fabs(a.m[i] - b.m[i]) > 1e-4f)
+			return true;
+	}
+	return false;
+}
+} // namespace
 
 bool Terrain::init()
 {
@@ -80,12 +75,15 @@ void Terrain::setHeightRange(float minZ_, float maxZ_)
 		maxZ = minZ + 0.01f;
 }
 
-float Terrain::worldHeight(int x, int y) const
+float Terrain::heightWorld(int gx, int gz) const
 {
-	if (x < 0 || y < 0 || x > gs->mapx || y > gs->mapy)
-		return minZ;
+	if (!map)
+		return minZ / kElmosPerUnit;
 
-	float f = map->heightmap[(gs->mapx + 1) * y + x];
+	gx = std::max(0, std::min(gs->mapx, gx));
+	gz = std::max(0, std::min(gs->mapy, gz));
+
+	float f = map->heightmap[(gs->mapx + 1) * gz + gx];
 	if (f < 0.0f)
 		f = 0.0f;
 	if (f > 1.0f)
@@ -93,197 +91,475 @@ float Terrain::worldHeight(int x, int y) const
 	return (minZ + f * (maxZ - minZ)) / kElmosPerUnit;
 }
 
-void Terrain::buildSquare(int bx, int by, int lod, const int neighbourLod[4],
-                          std::vector<float> &out)
+float Terrain::heightElmos(int gx, int gz) const
 {
-	int sqsize = 1024 >> lod;
-	if (sqsize < 1)
-		sqsize = 1;
+	return heightWorld(gx, gz) * kElmosPerUnit;
+}
 
-	const int step = 128 / sqsize < 1 ? 1 : 128 / sqsize;
-	const float quadWidth = 2.0f / (float)sqsize;
-	const int n = sqsize + 1;
-
-	const int baseX = bx * 128;
-	const int baseY = by * 128;
-
-	// Height of every grid point, in world units.
-	std::vector<float> h((size_t)n * n);
-	for (int Y = 0; Y < n; ++Y)
+void Terrain::deleteGpuResources()
+{
+	for (size_t i = 0; i < patches.size(); ++i)
 	{
-		for (int X = 0; X < n; ++X)
-			h[(size_t)Y * n + X] = worldHeight(baseX + 1 + X * step, baseY - 1 + Y * step);
+		if (patches[i].vao)
+			glDeleteVertexArrays(1, &patches[i].vao);
+		if (patches[i].ebo)
+			glDeleteBuffers(1, &patches[i].ebo);
 	}
+	patches.clear();
 
-	// A fine square and a coarse neighbour do not share the vertices along their
-	// border, so let the fine border follow the coarse neighbour's edge segments:
-	// that keeps the surfaces watertight.
-	auto sampleFront = [&](int d) { return worldHeight(baseX + 1 + d, baseY - 1); };
-	auto sampleBack = [&](int d) { return worldHeight(baseX + 1 + d, baseY + 127); };
-	auto sampleLeft = [&](int d) { return worldHeight(baseX + 1, baseY - 1 + d); };
-	auto sampleRight = [&](int d) { return worldHeight(baseX + 129, baseY - 1 + d); };
+	if (sharedVao)
+		glDeleteVertexArrays(1, &sharedVao);
+	if (sharedVbo)
+		glDeleteBuffers(1, &sharedVbo);
+	if (heightTexture)
+		glDeleteTextures(1, &heightTexture);
 
-	auto snapEdge = [&](float *edge, int nLod, auto sample) {
-		if (nLod <= lod)
-			return;
-		int nSize = 1024 >> nLod;
-		if (nSize < 1)
-			nSize = 1;
-		int nStep = 128 / nSize;
-		if (nStep < 1)
-			nStep = 1;
+	sharedVao = 0;
+	sharedVbo = 0;
+	heightTexture = 0;
+	heightTextureW = 0;
+	heightTextureH = 0;
+}
 
-		for (int i = 0; i < n; ++i)
-		{
-			int d = i * step;
-			int k = d / nStep;
-			int frac = d - k * nStep;
-			float h0 = (float)sample(k * nStep);
-			float h1 = (float)sample((k + 1) * nStep);
-			edge[i] = h0 + (h1 - h0) * (float)frac / (float)nStep;
-		}
-	};
+void Terrain::createSharedGrid()
+{
+	std::vector<float> verts;
+	verts.reserve((size_t)kPatchGrid * kPatchGrid * 5);
 
-	if (neighbourLod[0] > lod)
-		snapEdge(&h[0], neighbourLod[0], sampleFront);
-	if (neighbourLod[1] > lod)
-		snapEdge(&h[(size_t)sqsize * n], neighbourLod[1], sampleBack);
+	for (int y = 0; y < kPatchGrid; ++y)
 	{
-		std::vector<float> column((size_t)n);
-		if (neighbourLod[2] > lod)
+		for (int x = 0; x < kPatchGrid; ++x)
 		{
-			for (int i = 0; i < n; ++i)
-				column[(size_t)i] = h[(size_t)i * n];
-			snapEdge(column.data(), neighbourLod[2], sampleLeft);
-			for (int i = 0; i < n; ++i)
-				h[(size_t)i * n] = column[(size_t)i];
-		}
-		if (neighbourLod[3] > lod)
-		{
-			for (int i = 0; i < n; ++i)
-				column[(size_t)i] = h[(size_t)i * n + sqsize];
-			snapEdge(column.data(), neighbourLod[3], sampleRight);
-			for (int i = 0; i < n; ++i)
-				h[(size_t)i * n + sqsize] = column[(size_t)i];
+			verts.push_back((float)x * (2.0f / (float)kPatchSize));
+			verts.push_back(0.0f);
+			verts.push_back((float)y * (2.0f / (float)kPatchSize));
+			verts.push_back((float)x / (float)kPatchSize);
+			verts.push_back((float)y / (float)kPatchSize);
 		}
 	}
 
-	// Smooth normals from the height grid: the central differences give one
-	// normal per vertex, so the ground is shaded without visible facets.
-	std::vector<float> normals((size_t)n * n * 3);
-	const float inv2w = 1.0f / (2.0f * quadWidth);
-	for (int Y = 0; Y < n; ++Y)
-	{
-		for (int X = 0; X < n; ++X)
-		{
-			float hl = X > 0 ? h[(size_t)Y * n + X - 1]
-			                 : worldHeight(baseX + 1 - step, baseY - 1 + Y * step);
-			float hr = X < sqsize
-			               ? h[(size_t)Y * n + X + 1]
-			               : worldHeight(baseX + 1 + (sqsize + 1) * step, baseY - 1 + Y * step);
-			float hd = Y > 0 ? h[(size_t)(Y - 1) * n + X]
-			                 : worldHeight(baseX + 1 + X * step, baseY - 1 - step);
-			float hu = Y < sqsize
-			               ? h[(size_t)(Y + 1) * n + X]
-			               : worldHeight(baseX + 1 + X * step, baseY - 1 + (sqsize + 1) * step);
+	glGenVertexArrays(1, &sharedVao);
+	glGenBuffers(1, &sharedVbo);
+	glBindVertexArray(sharedVao);
+	glBindBuffer(GL_ARRAY_BUFFER, sharedVbo);
+	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)verts.size() * sizeof(float), verts.data(),
+	             GL_STATIC_DRAW);
 
-			float nx = -(hr - hl) * inv2w;
-			float nz = -(hu - hd) * inv2w;
-			float len = std::sqrt(nx * nx + 1.0f + nz * nz);
-			size_t i = ((size_t)Y * n + X) * 3;
-			normals[i + 0] = nx / len;
-			normals[i + 1] = 1.0f / len;
-			normals[i + 2] = nz / len;
+	const GLsizei stride = 5 * sizeof(float);
+	glEnableVertexAttribArray(0);
+	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0);
+	glEnableVertexAttribArray(1);
+	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(3 * sizeof(float)));
+	glBindVertexArray(0);
+}
+
+void Terrain::createHeightTexture()
+{
+	heightTextureW = gs->mapx + 1;
+	heightTextureH = gs->mapy + 1;
+
+	glGenTextures(1, &heightTexture);
+	glBindTexture(GL_TEXTURE_2D, heightTexture);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, heightTextureW, heightTextureH, 0, GL_RED, GL_FLOAT,
+	             map->heightmap);
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Terrain::updateHeightTexture(Patch &patch)
+{
+	int x0 = patch.bx * kPatchSize;
+	int y0 = patch.by * kPatchSize;
+	int w = std::min(kPatchGrid, heightTextureW - x0);
+	int h = std::min(kPatchGrid, heightTextureH - y0);
+	if (w <= 0 || h <= 0)
+		return;
+
+	std::vector<float> region((size_t)w * h);
+	for (int row = 0; row < h; ++row)
+	{
+		memcpy(&region[(size_t)row * w], &map->heightmap[(size_t)(y0 + row) * heightTextureW + x0],
+		       (size_t)w * sizeof(float));
+	}
+
+	glBindTexture(GL_TEXTURE_2D, heightTexture);
+	glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, w, h, GL_RED, GL_FLOAT, region.data());
+	glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void Terrain::updatePatchBounds(Patch &patch)
+{
+	float ymin = 1e30f;
+	float ymax = -1e30f;
+
+	for (int z = 0; z < kPatchGrid; ++z)
+	{
+		for (int x = 0; x < kPatchGrid; ++x)
+		{
+			float h = heightWorld(patch.bx * kPatchSize + x, patch.by * kPatchSize + z);
+			ymin = std::min(ymin, h);
+			ymax = std::max(ymax, h);
 		}
 	}
 
-	const float x0 = bx * 2.0f;
-	const float z0 = by * 2.0f;
-	const float uStep = 1.0f / (float)sqsize;
+	patch.cx0 = (float)patch.bx * 2.0f;
+	patch.cz0 = (float)patch.by * 2.0f;
+	patch.cx1 = patch.cx0 + 2.0f;
+	patch.cz1 = patch.cz0 + 2.0f;
+	patch.cy0 = ymin;
+	patch.cy1 = ymax;
 
-	for (int Y = 0; Y < sqsize; ++Y)
+	patch.midX = (patch.cx0 + patch.cx1) * 0.5f * kElmosPerUnit;
+	patch.midZ = (patch.cz0 + patch.cz1) * 0.5f * kElmosPerUnit;
+	patch.midY = (ymin + ymax) * 0.5f * kElmosPerUnit;
+}
+
+void Terrain::resetPatches()
+{
+	nextNode = 0;
+
+	for (size_t i = 0; i < patches.size(); ++i)
 	{
-		for (int X = 0; X < sqsize; ++X)
-		{
-			float px[4] = {x0 + (float)X * quadWidth, x0 + (float)(X + 1) * quadWidth,
-			               x0 + (float)(X + 1) * quadWidth, x0 + (float)X * quadWidth};
-			float pz[4] = {z0 + (float)Y * quadWidth, z0 + (float)Y * quadWidth,
-			               z0 + (float)(Y + 1) * quadWidth, z0 + (float)(Y + 1) * quadWidth};
-			const int gi[4] = {Y * n + X, Y * n + X + 1, (Y + 1) * n + X + 1, (Y + 1) * n + X};
-			float uu[4] = {(float)X * uStep, (float)(X + 1) * uStep, (float)(X + 1) * uStep,
-			               (float)X * uStep};
-			float vv[4] = {(float)Y * uStep, (float)Y * uStep, (float)(Y + 1) * uStep,
-			               (float)(Y + 1) * uStep};
+		Patch &patch = patches[i];
+		patch.baseLeft = TriNode();
+		patch.baseRight = TriNode();
+		patch.baseLeft.base = &patch.baseRight;
+		patch.baseRight.base = &patch.baseLeft;
+		patch.baseLeft.parentPatch = &patch;
+		patch.baseRight.parentPatch = &patch;
+		patch.changed = true;
+		// Keep the previous index buffer for hidden patches. If one enters view
+		// before the next retessellation, it still draws its last valid mesh
+		// instead of leaving a hole.
+	}
 
-			static const int order[6] = {0, 1, 2, 0, 2, 3};
-			for (int i = 0; i < 6; ++i)
-			{
-				int c = order[i];
-				pushVertex(out, px[c], h[(size_t)gi[c]], pz[c], normals[(size_t)gi[c] * 3 + 0],
-				           normals[(size_t)gi[c] * 3 + 1], normals[(size_t)gi[c] * 3 + 2], uu[c],
-				           vv[c]);
-			}
+	linkPatchNeighbors();
+}
+
+void Terrain::linkPatchNeighbors()
+{
+	for (int by = 0; by < bigY; ++by)
+	{
+		for (int bx = 0; bx < bigX; ++bx)
+		{
+			size_t index = (size_t)by * bigX + bx;
+			TriNode *baseLeft = &patches[index].baseLeft;
+			TriNode *baseRight = &patches[index].baseRight;
+
+			if (bx > 0)
+				baseLeft->leftNeighbor = &patches[index - 1].baseRight;
+			if (bx + 1 < bigX)
+				baseRight->leftNeighbor = &patches[index + 1].baseLeft;
+			if (by > 0)
+				baseLeft->rightNeighbor = &patches[index - bigX].baseRight;
+			if (by + 1 < bigY)
+				baseRight->rightNeighbor = &patches[index + bigX].baseLeft;
 		}
 	}
 }
 
-void Terrain::uploadSquare(int index, int lod)
+bool Terrain::allocateNode(TriNode *&left, TriNode *&right)
 {
-	BigSquare &sq = squares[(size_t)index];
-	int bx = (int)((size_t)index % (size_t)bigX);
-	int by = (int)((size_t)index / (size_t)bigX);
+	if (nextNode + 2 > nodePool.size())
+		return false;
 
-	// Levels of the neighbours: front, back, left, right. A square that is finer
-	// than a neighbour snaps its border onto that neighbour's edge segments.
-	int neighbourLod[4] = {lod, lod, lod, lod};
-	if (by > 0)
-		neighbourLod[0] = squares[(size_t)(by - 1) * bigX + bx].lod;
-	if (by + 1 < bigY)
-		neighbourLod[1] = squares[(size_t)(by + 1) * bigX + bx].lod;
-	if (bx > 0)
-		neighbourLod[2] = squares[(size_t)by * bigX + bx - 1].lod;
-	if (bx + 1 < bigX)
-		neighbourLod[3] = squares[(size_t)by * bigX + bx + 1].lod;
+	left = &nodePool[nextNode++];
+	right = &nodePool[nextNode++];
+	*left = TriNode();
+	*right = TriNode();
+	return true;
+}
 
-	std::vector<float> verts;
-	buildSquare(bx, by, lod, neighbourLod, verts);
+// Splits one triangle and maintains the diamond/neighbour links, exactly like
+// Patch::Split in RecoilEngine.
+bool Terrain::splitNode(Patch &patch, TriNode *node)
+{
+	if (!node)
+		return false;
+	if (!node->isLeaf())
+		return true;
 
-	if (!sq.vao)
+	Patch &owner = node->parentPatch ? *node->parentPatch : patch;
+
+	if (node->base && node->base->base != node)
 	{
-		glGenVertexArrays(1, &sq.vao);
-		glGenBuffers(1, &sq.vbo);
+		Patch &neighbourOwner = node->base->parentPatch ? *node->base->parentPatch : owner;
+		splitNode(neighbourOwner, node->base);
+		if (node->base->parentPatch != &owner)
+			owner.changed = true;
 	}
 
-	glBindVertexArray(sq.vao);
-	glBindBuffer(GL_ARRAY_BUFFER, sq.vbo);
-	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)verts.size() * sizeof(float), verts.data(),
-	             GL_DYNAMIC_DRAW);
+	TriNode *left = nullptr;
+	TriNode *right = nullptr;
+	if (!allocateNode(left, right))
+		return false;
 
-	const GLsizei stride = 8 * sizeof(float);
-	glEnableVertexAttribArray(0);
-	glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (const void *)0);
-	glEnableVertexAttribArray(1);
-	glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (const void *)(3 * sizeof(float)));
-	glEnableVertexAttribArray(2);
-	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (const void *)(6 * sizeof(float)));
+	node->left = left;
+	node->right = right;
+	left->parentPatch = &owner;
+	right->parentPatch = &owner;
+	owner.changed = true;
+
+	TriNode *leftNeighbor = node->leftNeighbor;
+	TriNode *rightNeighbor = node->rightNeighbor;
+	TriNode *baseNeighbor = node->base;
+
+	left->base = leftNeighbor;
+	left->leftNeighbor = right;
+	right->base = rightNeighbor;
+	right->rightNeighbor = left;
+
+	if (leftNeighbor)
+	{
+		if (leftNeighbor->base == node)
+			leftNeighbor->base = left;
+		else if (leftNeighbor->leftNeighbor == node)
+			leftNeighbor->leftNeighbor = left;
+		else if (leftNeighbor->rightNeighbor == node)
+			leftNeighbor->rightNeighbor = left;
+	}
+	if (rightNeighbor)
+	{
+		if (rightNeighbor->base == node)
+			rightNeighbor->base = right;
+		else if (rightNeighbor->rightNeighbor == node)
+			rightNeighbor->rightNeighbor = right;
+		else if (rightNeighbor->leftNeighbor == node)
+			rightNeighbor->leftNeighbor = right;
+	}
+
+	if (baseNeighbor)
+	{
+		if (!baseNeighbor->isLeaf())
+		{
+			left->rightNeighbor = baseNeighbor->right;
+			if (left->rightNeighbor)
+				left->rightNeighbor->leftNeighbor = left;
+			right->leftNeighbor = baseNeighbor->left;
+			if (right->leftNeighbor)
+				right->leftNeighbor->rightNeighbor = right;
+		} else
+		{
+			Patch &neighbourOwner = baseNeighbor->parentPatch ? *baseNeighbor->parentPatch : owner;
+			splitNode(neighbourOwner, baseNeighbor);
+			if (baseNeighbor->parentPatch != &owner)
+				owner.changed = true;
+		}
+	} else
+	{
+		left->rightNeighbor = nullptr;
+		right->leftNeighbor = nullptr;
+	}
+
+	return true;
+}
+
+float Terrain::recursComputeVariance(Patch &patch, int tree, int nodeIndex, IPoint left,
+                                     IPoint right, IPoint apex, float hLeft, float hRight,
+                                     float hApex)
+{
+	IPoint mid = {(left.x + right.x) >> 1, (left.y + right.y) >> 1};
+	float midHeight = heightElmos(patch.bx * kPatchSize + mid.x, patch.by * kPatchSize + mid.y);
+
+	float variance = std::fabs(midHeight - (hLeft + hRight) * 0.5f);
+	if ((hLeft * hRight) < 0.0f || (hLeft * midHeight) < 0.0f || (hRight * midHeight) < 0.0f)
+	{
+		variance = std::max(variance * 1.5f, 20.0f);
+	}
+
+	if (nodeIndex < kVarianceSize &&
+	    (std::abs(left.x - right.x) >= 4 || std::abs(left.y - right.y) >= 4))
+	{
+		variance = std::max(variance, recursComputeVariance(patch, tree, nodeIndex * 2, apex, left,
+		                                                    mid, hApex, hLeft, midHeight));
+		variance = std::max(variance, recursComputeVariance(patch, tree, nodeIndex * 2 + 1, right,
+		                                                    apex, mid, hRight, hApex, midHeight));
+	}
+
+	variance = std::max(0.001f, variance);
+	if (nodeIndex < kVarianceSize)
+		patch.variance[tree][nodeIndex] = variance;
+	return variance;
+}
+
+void Terrain::computeVariance(Patch &patch, int tree)
+{
+	if (tree == 0)
+	{
+		IPoint left = {0, kPatchSize};
+		IPoint right = {kPatchSize, 0};
+		IPoint apex = {0, 0};
+		float hLeft = heightElmos(patch.bx * kPatchSize + left.x, patch.by * kPatchSize + left.y);
+		float hRight =
+		    heightElmos(patch.bx * kPatchSize + right.x, patch.by * kPatchSize + right.y);
+		float hApex = heightElmos(patch.bx * kPatchSize + apex.x, patch.by * kPatchSize + apex.y);
+		recursComputeVariance(patch, tree, 1, left, right, apex, hLeft, hRight, hApex);
+	} else
+	{
+		IPoint left = {kPatchSize, 0};
+		IPoint right = {0, kPatchSize};
+		IPoint apex = {kPatchSize, kPatchSize};
+		float hLeft = heightElmos(patch.bx * kPatchSize + left.x, patch.by * kPatchSize + left.y);
+		float hRight =
+		    heightElmos(patch.bx * kPatchSize + right.x, patch.by * kPatchSize + right.y);
+		float hApex = heightElmos(patch.bx * kPatchSize + apex.x, patch.by * kPatchSize + apex.y);
+		recursComputeVariance(patch, tree, 1, left, right, apex, hLeft, hRight, hApex);
+	}
+}
+
+void Terrain::tessellate(Patch &patch, const float camPos[3], int viewRadius)
+{
+	if (viewRadius < 1)
+		viewRadius = 1;
+
+	float dx = patch.midX - camPos[0];
+	float dy = patch.midY - camPos[1];
+	float dz = patch.midZ - camPos[2];
+	float distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+	patch.lastCamDistance = distance;
+
+	float factor = distance * (300.0f / (float)viewRadius);
+	factor = std::max(1.0f, factor);
+	patch.camDistLODFactor = 1.0f / factor;
+	patch.varianceMaxLimit = (float)viewRadius * 0.35f;
+
+	{
+		IPoint left = {0, kPatchSize};
+		IPoint right = {kPatchSize, 0};
+		IPoint apex = {0, 0};
+		recursTessellate(patch, &patch.baseLeft, left, right, apex, 0, 1);
+	}
+	{
+		IPoint left = {kPatchSize, 0};
+		IPoint right = {0, kPatchSize};
+		IPoint apex = {kPatchSize, kPatchSize};
+		recursTessellate(patch, &patch.baseRight, left, right, apex, 1, 1);
+	}
+
+	if (patch.baseLeft.isLeaf() && patch.baseRight.isLeaf())
+		patch.changed = true;
+}
+
+void Terrain::recursTessellate(Patch &patch, TriNode *node, IPoint left, IPoint right, IPoint apex,
+                               int tree, int nodeIndex)
+{
+	if (!node)
+		return;
+	if (std::abs(left.x - right.x) <= 1 && std::abs(left.y - right.y) <= 1)
+		return;
+	if (!node->isLeaf())
+	{
+		IPoint center = {(left.x + right.x) >> 1, (left.y + right.y) >> 1};
+		recursTessellate(patch, node->left, apex, left, center, tree, nodeIndex * 2);
+		recursTessellate(patch, node->right, right, apex, center, tree, nodeIndex * 2 + 1);
+		return;
+	}
+
+	float variance = 10.0f;
+	if (nodeIndex < kVarianceSize)
+	{
+		int sizeX = std::abs(left.x - right.x);
+		int sizeY = std::abs(left.y - right.y);
+		int size = std::max(sizeX, sizeY);
+		float stored = patch.variance[tree][nodeIndex];
+		variance = std::min(stored, patch.varianceMaxLimit) * (float)kPatchSize * (float)size *
+		           patch.camDistLODFactor;
+	}
+
+	if (variance <= 1.0f)
+		return;
+
+	if (!splitNode(patch, node))
+		return;
+	if (node->isLeaf())
+		return;
+
+	IPoint center = {(left.x + right.x) >> 1, (left.y + right.y) >> 1};
+	recursTessellate(patch, node->left, apex, left, center, tree, nodeIndex * 2);
+	recursTessellate(patch, node->right, right, apex, center, tree, nodeIndex * 2 + 1);
+}
+
+void Terrain::recursRender(Patch &patch, TriNode *node, IPoint left, IPoint right, IPoint apex)
+{
+	if (!node)
+		return;
+	if (node->isLeaf())
+	{
+		int apexIndex = apex.x + apex.y * kPatchGrid;
+		int leftIndex = left.x + left.y * kPatchGrid;
+		int rightIndex = right.x + right.y * kPatchGrid;
+
+		if (node->base && node->base->base == node)
+		{
+			IPoint baseApex = {left.x + right.x - apex.x, left.y + right.y - apex.y};
+			if (baseApex.x >= 0 && baseApex.y >= 0 && baseApex.x < kPatchGrid &&
+			    baseApex.y < kPatchGrid)
+			{
+				float apexHeight =
+				    heightElmos(patch.bx * kPatchSize + apex.x, patch.by * kPatchSize + apex.y);
+				float leftHeight =
+				    heightElmos(patch.bx * kPatchSize + left.x, patch.by * kPatchSize + left.y);
+				float rightHeight =
+				    heightElmos(patch.bx * kPatchSize + right.x, patch.by * kPatchSize + right.y);
+				float baseApexHeight = heightElmos(patch.bx * kPatchSize + baseApex.x,
+				                                   patch.by * kPatchSize + baseApex.y);
+
+				float heightDiff = std::fabs(leftHeight - rightHeight);
+				float heightDiff2 = std::fabs(apexHeight - baseApexHeight);
+				if (heightDiff2 < heightDiff - 0.0001f)
+				{
+					int baseApexIndex = baseApex.x + baseApex.y * kPatchGrid;
+					patch.indices.push_back((uint32_t)apexIndex);
+					patch.indices.push_back((uint32_t)leftIndex);
+					patch.indices.push_back((uint32_t)baseApexIndex);
+					return;
+				}
+			}
+		}
+
+		patch.indices.push_back((uint32_t)apexIndex);
+		patch.indices.push_back((uint32_t)leftIndex);
+		patch.indices.push_back((uint32_t)rightIndex);
+		return;
+	}
+
+	IPoint center = {(left.x + right.x) >> 1, (left.y + right.y) >> 1};
+	recursRender(patch, node->left, apex, left, center);
+	recursRender(patch, node->right, right, apex, center);
+}
+
+void Terrain::generateIndices(Patch &patch)
+{
+	patch.indices.clear();
+
+	IPoint left = {0, kPatchSize};
+	IPoint right = {kPatchSize, 0};
+	IPoint apex = {0, 0};
+	recursRender(patch, &patch.baseLeft, left, right, apex);
+
+	left = {kPatchSize, 0};
+	right = {0, kPatchSize};
+	apex = {kPatchSize, kPatchSize};
+	recursRender(patch, &patch.baseRight, left, right, apex);
+}
+
+void Terrain::uploadIndices(Patch &patch)
+{
+	if (patch.indices.empty())
+	{
+		patch.indexCount = 0;
+		return;
+	}
+
+	glBindVertexArray(patch.vao);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.ebo);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)patch.indices.size() * sizeof(uint32_t),
+	             patch.indices.data(), GL_DYNAMIC_DRAW);
 	glBindVertexArray(0);
-
-	sq.count = (int)(verts.size() / 8);
-	sq.lod = lod;
-
-	sq.cx0 = (float)(bx * 2);
-	sq.cz0 = (float)(by * 2);
-	sq.cx1 = (float)(bx * 2 + 2);
-	sq.cz1 = (float)(by * 2 + 2);
-	sq.cy0 = 0.0f;
-	sq.cy1 = 0.0f;
-	for (size_t k = 0; k < verts.size(); k += 8)
-	{
-		if (verts[k + 1] < sq.cy0)
-			sq.cy0 = verts[k + 1];
-		if (verts[k + 1] > sq.cy1)
-			sq.cy1 = verts[k + 1];
-	}
+	patch.indexCount = (int)patch.indices.size();
 }
 
 void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures_)
@@ -293,130 +569,110 @@ void Terrain::build(CSmfReadMap *map_, CBFGroundTextures *textures_)
 	bigX = textures->numBigSquaresX();
 	bigY = textures->numBigSquaresY();
 
-	for (size_t i = 0; i < squares.size(); ++i)
-	{
-		if (squares[i].vao)
-			glDeleteVertexArrays(1, &squares[i].vao);
-		if (squares[i].vbo)
-			glDeleteBuffers(1, &squares[i].vbo);
-	}
+	deleteGpuResources();
+	createSharedGrid();
+	createHeightTexture();
 
-	squares.assign((size_t)bigX * bigY, BigSquare());
-	dirty.assign((size_t)bigX * bigY, 0);
-
-	for (int i = 0; i < (int)squares.size(); ++i)
-		uploadSquare(i, kDefaultLod);
-
-	printf("Terrain: %dx%d big squares, level %d\n", bigX, bigY, kDefaultLod);
-}
-
-int Terrain::lodOf(int bx, int by) const
-{
-	if (bx < 0 || by < 0 || bx >= bigX || by >= bigY)
-		return kDefaultLod;
-	return squares[(size_t)by * bigX + bx].lod;
-}
-
-bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees, int bias)
-{
-	if (squares.empty() || viewportHeight < 1)
-		return false;
-
-	const float tanHalfFov = std::tan(fovDegrees * 3.14159265358979f / 360.0f);
-	const float pixelsPerUnitAtOne = (0.5f * (float)viewportHeight) / tanHalfFov;
-
-	struct Change {
-		float size;
-		int index;
-		int lod;
-	};
-	std::vector<Change> changes;
+	patches.assign((size_t)bigX * bigY, Patch());
+	textureDirty.assign((size_t)bigX * bigY, 0);
+	nodePool.assign((size_t)kNodePoolSize, TriNode());
+	nextNode = 0;
 
 	for (int by = 0; by < bigY; ++by)
 	{
 		for (int bx = 0; bx < bigX; ++bx)
 		{
-			size_t i = (size_t)by * bigX + bx;
-			BigSquare &sq = squares[i];
+			Patch &patch = patches[(size_t)by * bigX + bx];
+			patch.bx = bx;
+			patch.by = by;
 
-			// Depth along the view direction, not the distance to the eye and
-			// not the projected extent: both make the mesh change while the
-			// camera only rotates.
-			float cx = bx * 2.0f + 1.0f;
-			float cz = by * 2.0f + 1.0f;
-			float camZ = view.m[2] * cx + view.m[6] * 0.0f + view.m[10] * cz + view.m[14];
-			float depth = -camZ;
+			glGenVertexArrays(1, &patch.vao);
+			glGenBuffers(1, &patch.ebo);
 
-			float size = 0.0f;
-			int want = kMaxLod;
-			if (depth > 0.01f)
-			{
-				size = 2.0f * pixelsPerUnitAtOne / depth;
-				float levelF = 10.0f + std::log2(kTargetQuadPixels) - std::log2(size) + (float)bias;
-				want = (int)std::floor(levelF);
-				if (want < kMinLod)
-					want = kMinLod;
-				if (want > kMaxLod)
-					want = kMaxLod;
+			glBindVertexArray(patch.vao);
+			glBindBuffer(GL_ARRAY_BUFFER, sharedVbo);
+			glEnableVertexAttribArray(0);
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (const void *)0);
+			glEnableVertexAttribArray(1);
+			glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float),
+			                      (const void *)(3 * sizeof(float)));
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.ebo);
+			glBindVertexArray(0);
 
-				// Coarsen while the height change from one quad to the next is
-				// below what a pixel can show: flat ground then collapses to a
-				// single quad, the way the engine leaves flat patches alone.
-				float relief = sq.cy1 - sq.cy0;
-				float pxPerUnit = size * 0.5f;
-				while (want < kMaxLod)
-				{
-					int quads = 1024 >> want;
-					if (quads < 1)
-						quads = 1;
-					float perQuad = relief / (float)quads;
-					if (perQuad * pxPerUnit >= 1.5f)
-						break;
-					++want;
-				}
-			}
-
-			sq.screenSize = size;
-			if (want != sq.lod)
-				changes.push_back({size, (int)i, want});
+			updatePatchBounds(patch);
+			patch.tessDirty = true;
 		}
 	}
 
-	if (changes.empty())
+	resetPatches();
+	haveLastView = false;
+	lastBias = 0;
+	tessellationDirty = true;
+
+	printf("Terrain: %dx%d ROAM patches\n", bigX, bigY);
+}
+
+bool Terrain::updateLods(const Mat4 &view, int viewportHeight, float fovDegrees, int bias,
+                         const float frustum[6][4])
+{
+	(void)viewportHeight;
+	(void)fovDegrees;
+
+	if (patches.empty())
 		return false;
 
-	// Refine the squares that cover the most screen first, and only a few per
-	// call so a zoom does not stall the frame.
-	std::sort(changes.begin(), changes.end(),
-	          [](const Change &a, const Change &b) { return a.size > b.size; });
+	static std::chrono::steady_clock::time_point lastUpdate;
+	std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
 
-	int done = 0;
-	long verts = 0;
-	for (size_t c = 0; c < changes.size(); ++c)
+	bool force = tessellationDirty;
+	if (!force && haveLastView && bias == lastBias && !viewChanged(view, lastView))
 	{
-		int quads = 1024 >> changes[c].lod;
-		if (quads < 1)
-			quads = 1;
-		long estimate = (long)quads * quads * 6;
-
-		if (done >= kRebuildsPerCall || (done > 0 && verts + estimate > kVerticesPerCall))
-			break;
-		verts += estimate;
-		int index = changes[c].index;
-		int bx = index % bigX;
-		int by = index / bigX;
-
-		// Neighbours snap their border onto this square, so they have to be
-		// rebuilt as well when its level changes.
-		markDirty(bx - 1, by);
-		markDirty(bx + 1, by);
-		markDirty(bx, by - 1);
-		markDirty(bx, by + 1);
-
-		squares[(size_t)index].lod = changes[c].lod;
-		uploadSquare(index, changes[c].lod);
-		++done;
+		return false;
 	}
+	if (!force && now - lastUpdate < std::chrono::milliseconds(100))
+		return false;
+
+	lastUpdate = now;
+
+	Mat4 invView = view.inverse();
+	float camX = 0.0f, camY = 0.0f, camZ = 0.0f;
+	invView.transformPoint(0.0f, 0.0f, 0.0f, camX, camY, camZ);
+	float camPos[3] = {camX * kElmosPerUnit, camY * kElmosPerUnit, camZ * kElmosPerUnit};
+
+	int viewRadius = kDefaultViewRadius + bias * 10;
+	viewRadius = std::max(kMinViewRadius, std::min(kMaxViewRadius, viewRadius));
+
+	for (size_t i = 0; i < patches.size(); ++i)
+	{
+		Patch &patch = patches[i];
+		patch.visible =
+		    boxInView(frustum, patch.cx0, patch.cy0, patch.cz0, patch.cx1, patch.cy1, patch.cz1);
+
+		if (patch.tessDirty)
+		{
+			computeVariance(patch, 0);
+			computeVariance(patch, 1);
+			patch.tessDirty = false;
+		}
+	}
+
+	resetPatches();
+
+	for (size_t i = 0; i < patches.size(); ++i)
+	{
+		Patch &patch = patches[i];
+		if (!patch.visible)
+			continue;
+
+		tessellate(patch, camPos, viewRadius);
+		generateIndices(patch);
+		uploadIndices(patch);
+	}
+
+	lastView = view;
+	haveLastView = true;
+	lastBias = bias;
+	tessellationDirty = false;
 	return true;
 }
 
@@ -424,28 +680,33 @@ void Terrain::markDirty(int bx, int by)
 {
 	if (bx < 0 || by < 0 || bx >= bigX || by >= bigY)
 		return;
-	dirty[(size_t)by * bigX + bx] = 1;
+
+	size_t index = (size_t)by * bigX + bx;
+	textureDirty[index] = 1;
+	patches[index].tessDirty = true;
+	tessellationDirty = true;
 }
 
 void Terrain::flushDirty()
 {
-	if (squares.empty())
+	if (patches.empty())
 		return;
 
-	for (size_t i = 0; i < squares.size(); ++i)
+	for (size_t i = 0; i < patches.size(); ++i)
 	{
-		if (!dirty[i])
+		if (!textureDirty[i])
 			continue;
-		uploadSquare((int)i, squares[i].lod);
-		dirty[i] = 0;
+		updateHeightTexture(patches[i]);
+		updatePatchBounds(patches[i]);
+		textureDirty[i] = 0;
 	}
 }
 
 void Terrain::draw(CBFGroundTextures *ground, GLuint metalTexture, const Mat4 &vp, int mode,
-                   int metalWidth, int metalHeight, float lightX, float lightY, float lightZ,
+                   int metalWidth, int metalHeight, const TerrainLight &light,
                    const float frustum[6][4])
 {
-	if (squares.empty())
+	if (patches.empty())
 		return;
 
 	shader.use();
@@ -453,39 +714,46 @@ void Terrain::draw(CBFGroundTextures *ground, GLuint metalTexture, const Mat4 &v
 	shader.set("maintex", 0);
 	shader.set("metaltex", 1);
 	shader.set("painttex", 2);
+	shader.set("heightMapTex", 3);
 	shader.set("mode", mode);
-	shader.set("lightDir", lightX, lightY, lightZ);
+	shader.set("sunDir", light.dir[0], light.dir[1], light.dir[2]);
+	shader.set("groundAmbientColor", light.ambient[0], light.ambient[1], light.ambient[2]);
+	shader.set("groundDiffuseColor", light.diffuse[0], light.diffuse[1], light.diffuse[2]);
+	shader.set("uMapSize", (float)heightTextureW, (float)heightTextureH);
+	shader.set("uHeightMin", minZ / kElmosPerUnit);
+	shader.set("uHeightScale", (maxZ - minZ) / kElmosPerUnit);
 
-	for (size_t i = 0; i < squares.size(); ++i)
+	glActiveTexture(GL_TEXTURE3);
+	glBindTexture(GL_TEXTURE_2D, heightTexture);
+
+	for (size_t i = 0; i < patches.size(); ++i)
 	{
-		const BigSquare &sq = squares[i];
-		int bx = (int)(i % (size_t)bigX);
-		int by = (int)(i / (size_t)bigX);
-
-		if (!boxInView(frustum, sq.cx0, sq.cy0, sq.cz0, sq.cx1, sq.cy1, sq.cz1))
+		const Patch &patch = patches[i];
+		if (patch.indexCount <= 0)
+			continue;
+		if (!boxInView(frustum, patch.cx0, patch.cy0, patch.cz0, patch.cx1, patch.cy1, patch.cz1))
 			continue;
 
 		glActiveTexture(GL_TEXTURE0);
-		glBindTexture(GL_TEXTURE_2D, ground->squares[by * bigX + bx].texture);
+		glBindTexture(GL_TEXTURE_2D, ground->squares[patch.by * bigX + patch.bx].texture);
 
 		glActiveTexture(GL_TEXTURE1);
 		glBindTexture(GL_TEXTURE_2D, metalTexture);
 
-		GLuint paint = ground->paintTexture(bx, by);
+		GLuint paint = ground->paintTexture(patch.bx, patch.by);
 		glActiveTexture(GL_TEXTURE2);
 		glBindTexture(GL_TEXTURE_2D, paint);
 		shader.set("hasPaint", paint ? 1 : 0);
 
-		// A big square is 128 map squares, and the metal map has one texel per
-		// two map squares, so it covers 64 by 64 texels of it.
-		shader.set("uMetalOffset", (float)(bx * 64) / (float)metalWidth,
-		           (float)(by * 64) / (float)metalHeight);
+		shader.set("uMetalOffset", (float)(patch.bx * 64) / (float)metalWidth,
+		           (float)(patch.by * 64) / (float)metalHeight);
 		shader.set("uMetalScale", 64.0f / (float)metalWidth, 64.0f / (float)metalHeight);
+		shader.set("uSquareOffset", (float)patch.bx * 2.0f, (float)patch.by * 2.0f);
 
-		glBindVertexArray(sq.vao);
-		glDrawArrays(GL_TRIANGLES, 0, sq.count);
+		glBindVertexArray(patch.vao);
+		glDrawElements(GL_TRIANGLES, patch.indexCount, GL_UNSIGNED_INT, nullptr);
 	}
 
-	glActiveTexture(GL_TEXTURE0);
 	glBindVertexArray(0);
+	glActiveTexture(GL_TEXTURE0);
 }

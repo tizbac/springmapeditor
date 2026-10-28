@@ -81,6 +81,17 @@ CBFGroundTextures::CBFGroundTextures(CSmfReadMap *rm)
 
 		fakevfs *tileFile = new fakevfs;
 		tileFile->f = fopen(path.c_str(), "rb");
+
+		// Projects copy the tile file to a fixed name, but the map inside the
+		// project still refers to the original file name. Fall back to map.smt so
+		// opening a saved project finds its tiles.
+		if (!tileFile->f && name != "map.smt")
+		{
+			string fallback = dir + "map.smt";
+			tileFile->f = fopen(fallback.c_str(), "rb");
+			if (tileFile->f)
+				path = fallback;
+		}
 		tileFile->Seek(0);
 
 		if (!tileFile->f)
